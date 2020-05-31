@@ -266,13 +266,13 @@ static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log
  * bffc mtime hi
  */
 
-static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
+static uint32_t clint_read_slice(void *opaque, uint32_t offset, int size_log2, int hartid)
 {
     RISCVMachine *m = (RISCVMachine *)opaque;
     uint32_t val;
 
     if (0 <= offset && offset < 0x4000) {
-        int hartid = offset >> 2;
+        //int hartid = offset >> 2;
         if (m->ncpus <= hartid) {
             fprintf(stderr, "%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
             val = 0;
@@ -286,7 +286,7 @@ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
         uint64_t mtime = m->cpu_state[0]->mcycle / RTC_FREQ_DIV;
         val = mtime >> 32;
     } else if (0x4000 <= offset && offset < 0xbff8) {
-        int hartid = (offset - 0x4000) >> 3;
+        //int hartid = (offset - 0x4000) >> 3;
         if (m->ncpus <= hartid) {
             fprintf(stderr, "%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
             val = 0;
@@ -319,8 +319,8 @@ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
     return val;
 }
 
-static void clint_write(void *opaque, uint32_t offset, uint32_t val,
-                        int size_log2)
+static void clint_write_slice(void *opaque, uint32_t offset, uint32_t val,
+                        int size_log2, int hartid)
 {
     RISCVMachine *m = (RISCVMachine *)opaque;
 
@@ -337,7 +337,7 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val,
     }
 
     if (0 <= offset && offset < 0x4000) {
-        int hartid = offset >> 2;
+        //int hartid = offset >> 2;
         if (m->ncpus <= hartid) {
             fprintf(stderr, "%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
         } else if (val & 1)
@@ -353,7 +353,7 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val,
         mtime = (mtime & 0x00000000FFFFFFFFL) + ((uint64_t)val << 32);
         m->cpu_state[0]->mcycle = mtime * RTC_FREQ_DIV;
     } else if (0x4000 <= offset && offset < 0xbff8) {
-        int hartid = (offset - 0x4000) >> 3;
+        //int hartid = (offset - 0x4000) >> 3;
         if (m->ncpus <= hartid) {
             fprintf(stderr, "%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
         } else if ((offset >> 2) & 1) {
@@ -371,6 +371,21 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val,
 #ifdef DUMP_CLINT
     fprintf(dromajo_stderr, "clint_write: offset=%x val=%x\n", offset, val);
 #endif
+}
+
+static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
+{
+    int hartid = (offset >> CORE_SHIFT);
+    uint32_t slice_offset = offset & OFFSET_MASK;
+    return clint_read_slice(opaque, slice_offset, size_log2, hartid);
+}
+
+static void clint_write(void *opaque, uint32_t offset, uint32_t val,
+                        int size_log2)
+{
+    int hartid = (offset >> CORE_SHIFT);
+    uint32_t slice_offset = offset & OFFSET_MASK;
+    return clint_write_slice(opaque, slice_offset, val, size_log2, hartid);
 }
 
 static void plic_update_mip(RISCVMachine *s, int hartid)
@@ -1193,23 +1208,11 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p)
         }
     }
 
-    SiFiveUARTState *uart = (SiFiveUARTState *)calloc(sizeof *uart, 1);
-    uart->irq = UART0_IRQ;
-    uart->cs  = p->console;
-    cpu_register_device(s->mem_map, UART0_BASE_ADDR, UART0_SIZE, uart,
-                        uart_read, uart_write, DEVIO_SIZE32);
-
-    DW_apb_uart_state *dw_apb_uart = (DW_apb_uart_state *)calloc(sizeof *dw_apb_uart, 1);
-    dw_apb_uart->irq = DW_APB_UART0_IRQ;
-    dw_apb_uart->cs  = p->console;
-    cpu_register_device(s->mem_map, DW_APB_UART0_BASE_ADDR, DW_APB_UART0_SIZE,
-                        dw_apb_uart, dw_apb_uart_read, dw_apb_uart_write,
-                        DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
-
-    cpu_register_device(s->mem_map, p->clint_base_addr, p->clint_size, s,
+    // BP Clint
+    uint64_t clint_size = p->clint_size + ((s->ncpus - 1) << CORE_SHIFT);
+    cpu_register_device(s->mem_map, p->clint_base_addr, clint_size, s,
                         clint_read, clint_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
-    cpu_register_device(s->mem_map, p->plic_base_addr, p->plic_size, s,
-                        plic_read, plic_write, DEVIO_SIZE32);
+
     //BP host
     host_init(s);
     cpu_register_device(s->mem_map, HOST_BASE_ADDR, HOST_SIZE, s,

@@ -59,7 +59,6 @@ EMU_OBJS:=virtio.o pci.o fs.o cutils.o iomem.o dw_apb_uart.o \
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-	CXXFLAGS += -Werror
 	EMU_LIBS=-lrt
 endif
 ifeq ($(UNAME_S),Darwin)

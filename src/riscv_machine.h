@@ -127,6 +127,12 @@ struct RISCVMachine {
 #define HOST_PUTCHAR   0x1000
 #define HOST_FINISH    0x2000
 
+#define OFFSET_MASK  0x00000FFFFF
+#define DEVICE_MASK  0x0000F00000
+#define CORE_MASK    0xFFFF000000
+#define DEVICE_SHIFT 20
+#define CORE_SHIFT   24
+
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
                            10 MHz frequency */
 
