@@ -191,6 +191,8 @@ static inline uint64_t track_iread(RISCVCPUState *s, uint64_t vaddr, uint64_t pa
 bool
 riscv_cpu_pmp_access_ok(RISCVCPUState *s, uint64_t paddr, size_t size, pmpcfg_t perm)
 {
+    return true;
+
     int priv;
 
     /* rv64mi-p-access expects illegal physical addresses to fail. */
@@ -1178,29 +1180,29 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = s->mhpmevent[csr & 0x1F];
         break;
 
-    case CSR_PMPCFG(0): // NB: 1 and 3 are _illegal_ in RV64
-    case CSR_PMPCFG(2):
-        val = s->csr_pmpcfg[csr - CSR_PMPCFG(0)];
-        break;
+    //case CSR_PMPCFG(0): // NB: 1 and 3 are _illegal_ in RV64
+    //case CSR_PMPCFG(2):
+    //    val = s->csr_pmpcfg[csr - CSR_PMPCFG(0)];
+    //    break;
 
-    case CSR_PMPADDR(0): // NB: *must* support either none or all
-    case CSR_PMPADDR(1):
-    case CSR_PMPADDR(2):
-    case CSR_PMPADDR(3):
-    case CSR_PMPADDR(4):
-    case CSR_PMPADDR(5):
-    case CSR_PMPADDR(6):
-    case CSR_PMPADDR(7):
-    case CSR_PMPADDR(8):
-    case CSR_PMPADDR(9):
-    case CSR_PMPADDR(10):
-    case CSR_PMPADDR(11):
-    case CSR_PMPADDR(12):
-    case CSR_PMPADDR(13):
-    case CSR_PMPADDR(14):
-    case CSR_PMPADDR(15):
-        val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)];
-        break;
+    //case CSR_PMPADDR(0): // NB: *must* support either none or all
+    //case CSR_PMPADDR(1):
+    //case CSR_PMPADDR(2):
+    //case CSR_PMPADDR(3):
+    //case CSR_PMPADDR(4):
+    //case CSR_PMPADDR(5):
+    //case CSR_PMPADDR(6):
+    //case CSR_PMPADDR(7):
+    //case CSR_PMPADDR(8):
+    //case CSR_PMPADDR(9):
+    //case CSR_PMPADDR(10):
+    //case CSR_PMPADDR(11):
+    //case CSR_PMPADDR(12):
+    //case CSR_PMPADDR(13):
+    //case CSR_PMPADDR(14):
+    //case CSR_PMPADDR(15):
+    //    val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)];
+    //    break;
 
     default:
     invalid_csr:
@@ -1499,55 +1501,55 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mhpmevent[csr & 0x1F] = val & (HPM_EVENT_SETMASK | HPM_EVENT_EVENTMASK);
         break;
 
-    case CSR_PMPCFG(0): // NB: 1 and 3 are _illegal_ in RV64
-    case CSR_PMPCFG(2): {
-        assert(PMP_N % 8 == 0);
-        int      c    = csr - CSR_PMPCFG(0);
+    //case CSR_PMPCFG(0): // NB: 1 and 3 are _illegal_ in RV64
+    //case CSR_PMPCFG(2): {
+    //    assert(PMP_N % 8 == 0);
+    //    int      c    = csr - CSR_PMPCFG(0);
 
-        if (PMP_N <= c/2 * 8)
-            break;
+    //    if (PMP_N <= c/2 * 8)
+    //        break;
 
-        uint64_t orig = s->csr_pmpcfg[c];
-        uint64_t new_val  = 0;
+    //    uint64_t orig = s->csr_pmpcfg[c];
+    //    uint64_t new_val  = 0;
 
-        for (int i = 0; i < 8; ++i) {
-            uint64_t cfg = (orig >> (i * 8)) & 255;
-            if ((cfg & PMPCFG_L) == 0)
-                cfg = (val >> (i * 8)) & 255;
-            cfg &= ~PMPCFG_RES;
-            new_val |= cfg << (i * 8);
-        }
+    //    for (int i = 0; i < 8; ++i) {
+    //        uint64_t cfg = (orig >> (i * 8)) & 255;
+    //        if ((cfg & PMPCFG_L) == 0)
+    //            cfg = (val >> (i * 8)) & 255;
+    //        cfg &= ~PMPCFG_RES;
+    //        new_val |= cfg << (i * 8);
+    //    }
 
-        s->csr_pmpcfg[c] = new_val;
+    //    s->csr_pmpcfg[c] = new_val;
 
-        unpack_pmpaddrs(s);
-        break;
-    }
+    //    unpack_pmpaddrs(s);
+    //    break;
+    //}
 
-    case CSR_PMPADDR(0): // NB: *must* support either none or all
-    case CSR_PMPADDR(1):
-    case CSR_PMPADDR(2):
-    case CSR_PMPADDR(3):
-    case CSR_PMPADDR(4):
-    case CSR_PMPADDR(5):
-    case CSR_PMPADDR(6):
-    case CSR_PMPADDR(7):
-    case CSR_PMPADDR(8):
-    case CSR_PMPADDR(9):
-    case CSR_PMPADDR(10):
-    case CSR_PMPADDR(11):
-    case CSR_PMPADDR(12):
-    case CSR_PMPADDR(13):
-    case CSR_PMPADDR(14):
-    case CSR_PMPADDR(15):
-        if (PMP_N <= csr - CSR_PMPADDR(0))
-            break;
+    //case CSR_PMPADDR(0): // NB: *must* support either none or all
+    //case CSR_PMPADDR(1):
+    //case CSR_PMPADDR(2):
+    //case CSR_PMPADDR(3):
+    //case CSR_PMPADDR(4):
+    //case CSR_PMPADDR(5):
+    //case CSR_PMPADDR(6):
+    //case CSR_PMPADDR(7):
+    //case CSR_PMPADDR(8):
+    //case CSR_PMPADDR(9):
+    //case CSR_PMPADDR(10):
+    //case CSR_PMPADDR(11):
+    //case CSR_PMPADDR(12):
+    //case CSR_PMPADDR(13):
+    //case CSR_PMPADDR(14):
+    //case CSR_PMPADDR(15):
+    //    if (PMP_N <= csr - CSR_PMPADDR(0))
+    //        break;
 
-        // Note, due to TOR ranges, one PMPADDR can affect two entries
-        // but we just recalculate all of them
-        s->csr_pmpaddr[csr - CSR_PMPADDR(0)] = val & PMPADDR_MASK;
-        unpack_pmpaddrs(s);
-        break;
+    //    // Note, due to TOR ranges, one PMPADDR can affect two entries
+    //    // but we just recalculate all of them
+    //    s->csr_pmpaddr[csr - CSR_PMPADDR(0)] = val & PMPADDR_MASK;
+    //    unpack_pmpaddrs(s);
+    //    break;
 
     case 0xb00: /* mcycle */
         s->mcycle = val;
@@ -1715,6 +1717,12 @@ static void handle_sret(RISCVCPUState *s)
     int spp = (s->mstatus & MSTATUS_SPP) >> MSTATUS_SPP_SHIFT;
     s->mstatus &= ~MSTATUS_SPP;
 
+    // Clear MPRV on non m-mode sret
+    switch (spp) {
+    case PRV_M: break;
+    default: s->mstatus &= ~MSTATUS_MPRV;
+    }
+
     set_priv(s, spp);
     s->pc = s->sepc;
 }
@@ -1728,6 +1736,12 @@ static void handle_mret(RISCVCPUState *s)
 
     int mpp = (s->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT;
     s->mstatus &= ~MSTATUS_MPP;
+
+    // Clear MPRV on non m-mode mret
+    switch (mpp) {
+    case PRV_M: break;
+    default: s->mstatus &= ~MSTATUS_MPRV;
+    }
 
     set_priv(s, mpp);
     s->pc = s->mepc;
@@ -1904,7 +1918,8 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid)
     if (machine->custom_extension)
         s->misa |= MCPUID_X;
 
-    s->misa = MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A | MCPUID_F | MCPUID_D;
+    // Override the ISA value here
+    s->misa = MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;// | MCPUID_F | MCPUID_D;
     printf("misa: %x\n", s->misa);
     s->mvendorid = 11 * 128 + 101; // Esperanto JEDEC number 101 in bank 11 (Change for your own)
     s->marchid   = (1ULL << 63) | 2;
