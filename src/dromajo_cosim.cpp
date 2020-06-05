@@ -93,6 +93,15 @@ static inline bool is_amo(uint32_t insn) {
     }
 }
 
+static inline bool is_sc(uint32_t insn)
+{
+    int opcode = insn & 0x7f;
+    int func = insn >> 27;
+    if (opcode == 0x2f && func == 3)
+        return true;
+    return false;
+}
+
 /*
  * is_mmio_load() --
  * mmio values are copied from DUT, simple check to see if it is RAM/Virt Device
@@ -137,6 +146,10 @@ static inline void handle_dut_overrides(RISCVCPUState *s, int priv, uint64_t pc,
     if (opcode == 0x73 && rd != 0
         && (0xB00 <= csrno && csrno < 0xB20 || 0xC00 <= csrno && csrno < 0xC20
             || (csrno == 0x344 /* mip */ || csrno == 0x144 /* sip */)))
+        riscv_set_reg(s, rd, dut_wdata);
+
+    /* Catch Store Conditionals */
+    if (is_sc(insn) && rd != 0)
         riscv_set_reg(s, rd, dut_wdata);
 
     /* Catch loads and amo from MMIO space */
