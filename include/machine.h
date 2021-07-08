@@ -191,6 +191,9 @@ typedef struct {
     /* Enable BlackParrot Host */
     bool host;
 
+    /* Enable HammerBlade Manycore as accelerator */
+    bool manycore;
+
     /* Periodically create checkpoints */
     uint64_t checkpoint_period;
 

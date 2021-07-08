@@ -117,6 +117,9 @@ struct RISCVMachine {
     /* Enable BlackParrot Host */
     bool host;
 
+    /* Enable HammerBlade Manycore Accelerator */
+    bool manycore;
+
     /* Periodically create checkpoints */
     uint64_t checkpoint_period;
 };
@@ -132,6 +135,17 @@ struct RISCVMachine {
 #define HOST_GETCHAR   0x0
 #define HOST_PUTCHAR   0x1000
 #define HOST_FINISH    0x2000
+
+#define MANYCORE_BASE_ADDR              0x00500000
+#define MANYCORE_SIZE                   0x00100000
+#define MANYCORE_HOST_REQ_FIFO_ADDR     0x01000
+#define MANYCORE_HOST_REQ_CREDITS_ADDR  0x02000
+#define MANYCORE_HOST_RESP_FIFO_ADDR    0x03000
+#define MANYCORE_HOST_RESP_ENTRIES_ADDR 0x04000
+#define MANYCORE_MC_REQ_FIFO_ADDR       0x05000
+#define MANYCORE_MC_REQ_ENTRIES_ADDR    0x06000
+#define MANYCORE_ROM_START_ADDR         0x07000
+#define MANYCORE_ROM_END_ADDR           0x07fff
 
 #define OFFSET_MASK  0x00000FFFFF
 #define DEVICE_MASK  0x0000F00000

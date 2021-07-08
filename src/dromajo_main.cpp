@@ -567,6 +567,7 @@ static void usage(const char *prog, const char *msg) {
             "       --custom_extension add X extension to isa\n"
             "       --enable_amo enables atomic instructions\n"
             "       --host enable BlackParrot host\n"
+            "       --manycore enable HammerBlade Manycore accelerator\n"
             "       --checkpoint_period creates a checkpoint evey N instructions\n",
             "       --clear_ids clear mvendorid, marchid, mimpid for all cores\n",
             msg,
@@ -629,6 +630,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     bool        custom_extension         = false;
     bool        amo_en                   = false;
     bool        host                     = false;
+    bool        manycore                 = false;
     uint64_t    checkpoint_period        = 0;
     const char *simpoint_file            = 0;
     bool        clear_ids                = false;
@@ -663,6 +665,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"custom_extension",              no_argument, 0,  'u' }, // CFG
             {"enable_amo",                    no_argument, 0,  'a' },
             {"host",                          no_argument, 0,  'h' },
+            {"manycore",                      no_argument, 0,  'H'},
             {"checkpoint_period",       required_argument, 0,  'e' },
             {"clear_ids",                     no_argument, 0,  'L' }, // CFG
             {0,                         0,                 0,  0 }
@@ -824,6 +827,8 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             case 'a': amo_en = true; break;
 
             case 'h': host = true; break;
+
+            case 'H': manycore = true; break;
 
             case 'e':
                 if(checkpoint_period)
@@ -1010,6 +1015,9 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
 
     // BlackParrot Host
     p->host = host;
+
+    // HammerBlade Manycore Accelerator
+    p->manycore = manycore;
 
     // Checkpoint Period
     p->checkpoint_period = checkpoint_period;
