@@ -237,10 +237,19 @@ static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log
   }
 }
 
+/* Declare the manycore FIFOs
+ * TODO: A better method to handle these would be to create template abstract classes
+ * for a generic accelerator using FIFOs to communicate with the accelerator and then
+ * create an actual class for each accelerator we want that inherits the template class
+ */
 mc_fifo_t *host_to_mc_req_fifo;
 mc_fifo_t *mc_to_host_req_fifo;
 mc_fifo_t *mc_to_host_resp_fifo;
 
+/* manycore_init
+ * Initialize all the manycore FIFOs with default values
+ * @param[in] m --> The RISCVMachine instance
+ */
 void manycore_init(RISCVMachine* m) {
   if (m->manycore) {
     // Initialize Host --> MC Request FIFO
@@ -257,10 +266,18 @@ void manycore_init(RISCVMachine* m) {
   }
 }
 
+/* manycore_read
+ * A device read function to read from the manycore->host request and response FIFOs
+ * @param[in] opaque --> A void* cast of the RISCVMachine object
+ * @param[in] offset --> Offset from the device base address
+ * @param[in] size_log2 (unused) --> size of the read
+ * @returns the read value on success or a fail code if the read fails
+ */
 static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) { 
   RISCVMachine *m = (RISCVMachine *)opaque;
   uint32_t c = 0xFFFFFFFF;
   if (m->manycore) {
+    // Check include/riscv_machine.h for the address map
     switch (offset & 0x0f000) {
       case MANYCORE_HOST_REQ_CREDITS_ADDR:
       {
@@ -312,8 +329,15 @@ static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) {
   return c;
 }
 
+/* manycore_write
+ * A device write function to write to the host->manycore request FIFO
+ * @param[in] opaque --> A void* cast of the RISCVMachine object
+ * @param[in] offset --> Offset from the device base address
+ * @param[in] size_log2 (unused) --> size of the read
+ */
 static void manycore_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
   RISCVMachine *m = (RISCVMachine *)opaque;
+  // Check include/riscv_machine.h for the address map
   if (m->manycore && ((offset & 0x0f000) == MANYCORE_HOST_REQ_FIFO_ADDR)) {
     uint32_t fifo_id = offset & 0x0000f;
     mc_fifo_type_t fifo_type = FIFO_HOST_TO_MC_REQ;

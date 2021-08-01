@@ -3,12 +3,13 @@
  * API definitons for Dromajo/BlackParrot to interact with the Manycore
  */
 
-#ifndef _MANYCORE_H
-#define _MANYCORE_H 1
+#ifndef DROMAJO_MANYCORE_H
+#define DROMAJO_MANYCORE_H 1
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <xmmintrin.h>
 
 #include <vector>
 #include <queue>
@@ -18,21 +19,18 @@
 extern "C" {
 #endif
 
-// Maximum number of credits for requests from the host to the manycore
-// NOTE: Keep this in sync with the hardware implementation
-#define MAX_CREDITS 32
 #define RW_FAIL_CODE 0xFFFFFFFF
 
 // All 128-bit FIFOs can have a maximum of N elements each
 #ifndef FIFO_MAX_ELEMENTS
-#define FIFO_MAX_ELEMENTS 32
+#error FIFO_MAX_ELEMENTS not defined
 #endif
 
 // NOTE: The host does not respond to the manycore
 
 typedef union mc_pkt_t {
   // 128-bit packet sent/received over the DPI
-  __int128_t pkt128;
+  __m128i pkt128;
   // 4 32-bit packets to send to dromajo manycore FIFOs
   uint32_t pkt32[4];
 } mc_pkt_t;

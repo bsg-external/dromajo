@@ -2,8 +2,7 @@
  * API definitions for Dromajo to interact with the HammerBlade Manycore
  */
 
-#include "dromajo_manycore.h"
-#include <iostream>
+#include <dromajo_manycore.h>
 
 // Helper functions
 bool get_fifo_empty(mc_fifo_t *fifo, bool _empty = false, uint32_t fifo_id = 0x0);
