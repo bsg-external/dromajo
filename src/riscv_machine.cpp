@@ -285,6 +285,13 @@ static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) {
         c = mc_fifo_get_credits(fifo_type);
       }
       break;
+      case MANYCORE_HOST_REQ_ENTRIES_ADDR:
+      {
+        mc_fifo_type_t fifo_type = FIFO_HOST_TO_MC_REQ;
+        bool is_fifo_empty = mc_is_fifo_empty(fifo_type);
+        c = is_fifo_empty ? 0 : 1;
+      }
+      break;
       case MANYCORE_MC_REQ_FIFO_ADDR:
       {
         // FIFO ID decides which FIFO (of the 4 32-bit FIFOs) to read/write
@@ -304,7 +311,7 @@ static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) {
         c = is_fifo_empty ? 0 : 1;
       }
       break;
-      case MANYCORE_HOST_RESP_FIFO_ADDR:
+      case MANYCORE_MC_RESP_FIFO_ADDR:
       {
         uint32_t fifo_id = offset & 0x000f;
         mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_RESP;
@@ -314,7 +321,7 @@ static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) {
         c = fifo_read_status ? fifo_read_val : RW_FAIL_CODE;
       }
       break;
-      case MANYCORE_HOST_RESP_ENTRIES_ADDR:
+      case MANYCORE_MC_RESP_ENTRIES_ADDR:
       {
         mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_RESP;
         bool is_fifo_empty = mc_is_fifo_empty(fifo_type);
