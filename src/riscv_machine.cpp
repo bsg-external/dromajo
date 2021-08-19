@@ -1095,7 +1095,7 @@ static int generate_bootrom(RISCVMachine *s) {
      * argument.
      */
 
-    if (s->ram_base_addr != 0x0080000000 && s->ram_base_addr != 0x8000000000 && s->ram_base_addr != 0xC000000000) {
+    if (s->ram_base_addr != 0x0080000000 && s->ram_base_addr != 0x0081000000 && s->ram_base_addr != 0x8000000000 && s->ram_base_addr != 0xC000000000) {
         vm_error("Dromajo doesn't support BOOTROM generation for base address 0x%0" PRIx64
                  " please provide a custom bootrom via the --bootrom option or the bootrom"
                  " config parameter\n",
@@ -1122,6 +1122,9 @@ static int generate_bootrom(RISCVMachine *s) {
     if (s->ram_base_addr == 0xC000000000) {
         *q++ = 0x0030041b;  //         addiw  s0, zero, 3
         *q++ = 0x02641413;  //         slli   s0, s0, 38
+    } else if (s->ram_base_addr == 0x81000000) {
+            *q++ = 0x0810041b;  // addiw s0, zero, 129
+            *q++ = 0x01841413;  // slli s0, s0, 24
     } else {
         *q++ = 0x0010041b;  //         addiw  s0, zero, 1
         if (s->ram_base_addr == 0x80000000)
