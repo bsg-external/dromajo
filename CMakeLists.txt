@@ -119,6 +119,7 @@ add_library(dromajo_cosim STATIC
         src/dromajo_main.cpp
         src/dromajo_cosim.cpp
         src/riscv_cpu.cpp
+        src/dromajo_manycore.cpp
         )
 
 add_executable(dromajo src/dromajo.cpp)

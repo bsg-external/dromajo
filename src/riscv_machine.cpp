@@ -57,6 +57,8 @@
 #include "elf64.h"
 #include "iomem.h"
 
+#include "dromajo_manycore.h"
+
 /* RISCV machine */
 
 //#define DUMP_UART
@@ -232,6 +234,126 @@ static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log
           return;
       exit(0);
     }
+  }
+}
+
+/* Declare the manycore FIFOs
+ * TODO: A better method to handle these would be to create template abstract classes
+ * for a generic accelerator using FIFOs to communicate with the accelerator and then
+ * create an actual class for each accelerator we want that inherits the template class
+ */
+mc_fifo_t *host_to_mc_req_fifo;
+mc_fifo_t *mc_to_host_req_fifo;
+mc_fifo_t *mc_to_host_resp_fifo;
+
+/* manycore_init
+ * Initialize all the manycore FIFOs with default values
+ * @param[in] m --> The RISCVMachine instance
+ */
+void manycore_init(RISCVMachine* m) {
+  if (m->manycore) {
+    // Initialize Host --> MC Request FIFO
+    host_to_mc_req_fifo = new mc_fifo_t;
+    mc_fifo_init(host_to_mc_req_fifo);
+
+    // Initialize Host --> MC Request FIFO
+    mc_to_host_req_fifo = new mc_fifo_t;
+    mc_fifo_init(mc_to_host_req_fifo);
+
+    // Initialize Host --> MC Request FIFO
+    mc_to_host_resp_fifo = new mc_fifo_t;
+    mc_fifo_init(mc_to_host_resp_fifo);
+  }
+}
+
+/* manycore_read
+ * A device read function to read from the manycore->host request and response FIFOs
+ * @param[in] opaque --> A void* cast of the RISCVMachine object
+ * @param[in] offset --> Offset from the device base address
+ * @param[in] size_log2 (unused) --> size of the read
+ * @returns the read value on success or a fail code if the read fails
+ */
+static uint32_t manycore_read(void *opaque, uint32_t offset, int size_log2) { 
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  uint32_t c = 0xFFFFFFFF;
+  if (m->manycore) {
+    // Check include/riscv_machine.h for the address map
+    switch (offset & 0x0f000) {
+      case MANYCORE_HOST_REQ_CREDITS_ADDR:
+      {
+        mc_fifo_type_t fifo_type = FIFO_HOST_TO_MC_REQ;
+        c = mc_fifo_get_credits(fifo_type);
+      }
+      break;
+      case MANYCORE_HOST_REQ_ENTRIES_ADDR:
+      {
+        mc_fifo_type_t fifo_type = FIFO_HOST_TO_MC_REQ;
+        bool is_fifo_empty = mc_is_fifo_empty(fifo_type);
+        c = is_fifo_empty ? 0 : 1;
+      }
+      break;
+      case MANYCORE_MC_REQ_FIFO_ADDR:
+      {
+        // FIFO ID decides which FIFO (of the 4 32-bit FIFOs) to read/write
+        uint32_t fifo_id = offset & 0x0000f;
+        mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_REQ;
+        bool fifo_read_status;
+        uint32_t fifo_read_val;
+        // Read the FIFO until the read succeeds
+        fifo_read_status = mc_fifo_read(fifo_type, fifo_id, &fifo_read_val);
+        c = fifo_read_status ? fifo_read_val : RW_FAIL_CODE;
+      }
+      break;
+      case MANYCORE_MC_REQ_ENTRIES_ADDR:
+      {
+        mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_REQ;
+        bool is_fifo_empty = mc_is_fifo_empty(fifo_type);
+        c = is_fifo_empty ? 0 : 1;
+      }
+      break;
+      case MANYCORE_MC_RESP_FIFO_ADDR:
+      {
+        uint32_t fifo_id = offset & 0x000f;
+        mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_RESP;
+        int fifo_read_status = -1;
+        uint32_t fifo_read_val;
+        fifo_read_status = mc_fifo_read(fifo_type, fifo_id, &fifo_read_val);
+        c = fifo_read_status ? fifo_read_val : RW_FAIL_CODE;
+      }
+      break;
+      case MANYCORE_MC_RESP_ENTRIES_ADDR:
+      {
+        mc_fifo_type_t fifo_type = FIFO_MC_TO_HOST_RESP;
+        bool is_fifo_empty = mc_is_fifo_empty(fifo_type);
+        c = is_fifo_empty ? 0 : 1;
+      }
+      break;
+      default:
+            ;
+      break;
+    }
+  }
+  return c;
+}
+
+/* manycore_write
+ * A device write function to write to the host->manycore request FIFO
+ * @param[in] opaque --> A void* cast of the RISCVMachine object
+ * @param[in] offset --> Offset from the device base address
+ * @param[in] size_log2 (unused) --> size of the read
+ */
+static void manycore_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  // Check include/riscv_machine.h for the address map
+  if (m->manycore && ((offset & 0x0f000) == MANYCORE_HOST_REQ_FIFO_ADDR)) {
+    uint32_t fifo_id = offset & 0x0000f;
+    mc_fifo_type_t fifo_type = FIFO_HOST_TO_MC_REQ;
+    bool fifo_write_success;
+
+    // Make sure writes succeed since they don't return anything to software
+    do {
+      fifo_write_success = mc_fifo_write(fifo_type, fifo_id, val);
+    } while (!fifo_write_success);
   }
 }
 
@@ -1162,6 +1284,7 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
 
     s->amo_en = p->amo_en;
     s->host = p->host;
+    s->manycore = p->manycore;
     s->checkpoint_period = p->checkpoint_period;
 
     if (MAX_CPUS < s->ncpus) {
@@ -1214,6 +1337,10 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     cpu_register_device(s->mem_map, HOST_BASE_ADDR, HOST_SIZE, s,
                         host_read, host_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
+    // HammerBlade Manycore Accelerator
+    manycore_init(s);
+    cpu_register_device(s->mem_map, MANYCORE_BASE_ADDR, MANYCORE_SIZE, s, 
+                        manycore_read, manycore_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
     for (int j = 1; j < 32; j++) {
         irq_init(&s->plic_irq[j], plic_set_irq, s, j);
