@@ -188,6 +188,9 @@ typedef struct {
     /* Enable atomic instructions */
     bool amo_en;
 
+    /* Enable mulh extention */
+    bool mulh;
+
     /* Enable BlackParrot Host */
     bool host;
 

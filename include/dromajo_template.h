@@ -1008,9 +1008,21 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                     funct3 = (insn >> 12) & 7;
                     switch (funct3) {
                         case 0: /* mul */ val = (intx_t)((intx_t)val * (intx_t)val2); break;
-                        case 1: /* mulh */ goto illegal_insn; val = (intx_t)glue(mulh, XLEN)(val, val2); break;
-                        case 2: /* mulhsu */ goto illegal_insn; val = (intx_t)glue(mulhsu, XLEN)(val, val2); break;
-                        case 3: /* mulhu */ goto illegal_insn; val = (intx_t)glue(mulhu, XLEN)(val, val2); break;
+                        case 1: /* mulh */
+                            if (!s->machine->mulh)
+                                goto illegal_insn;
+                            val = (intx_t)glue(mulh, XLEN)(val, val2); 
+                            break;
+                        case 2: /* mulhsu */
+                            if (!s->machine->mulh)
+                                goto illegal_insn;
+                            val = (intx_t)glue(mulhsu, XLEN)(val, val2); 
+                            break;
+                        case 3: /* mulhu */
+                            if (!s->machine->mulh)
+                                goto illegal_insn;
+                            val = (intx_t)glue(mulhu, XLEN)(val, val2); 
+                            break;
                         case 4: /* div */ val = glue(div, XLEN)(val, val2); break;
                         case 5: /* divu */ val = (intx_t)glue(divu, XLEN)(val, val2); break;
                         case 6: /* rem */ val = glue(rem, XLEN)(val, val2); break;

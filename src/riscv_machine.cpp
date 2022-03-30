@@ -1188,6 +1188,7 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     s->clear_ids = p->clear_ids;
 
     s->amo_en = p->amo_en;
+    s->mulh = p->mulh;
     s->host = p->host;
     s->checkpoint_period = p->checkpoint_period;
 

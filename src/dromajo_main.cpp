@@ -569,6 +569,7 @@ static void usage(const char *prog, const char *msg) {
             "       --clint START:SIZE set CLINT start address and size (defaults to 0x%lx:0x%lx)\n"
             "       --custom_extension add X extension to isa\n"
             "       --enable_amo enables atomic instructions\n"
+            "       --enable_mulh enables mulh extention support\n"
             "       --host enable BlackParrot host\n"
             "       --checkpoint_period creates a checkpoint evey N instructions\n",
             "       --clear_ids clear mvendorid, marchid, mimpid for all cores\n",
@@ -631,6 +632,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     uint64_t    clint_size_override      = 0;
     bool        custom_extension         = false;
     bool        amo_en                   = false;
+    bool        mulh                     = false;
     bool        host                     = false;
     uint64_t    checkpoint_period        = 0;
     const char *simpoint_file            = 0;
@@ -665,6 +667,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"clint",                   required_argument, 0,  'C' }, // CFG
             {"custom_extension",              no_argument, 0,  'u' }, // CFG
             {"enable_amo",                    no_argument, 0,  'a' },
+            {"enable_mulh",                   no_argument, 0,  'H' },
             {"host",                          no_argument, 0,  'h' },
             {"checkpoint_period",       required_argument, 0,  'e' },
             {"clear_ids",                     no_argument, 0,  'L' }, // CFG
@@ -825,6 +828,8 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             case 'u': custom_extension = true; break;
 
             case 'a': amo_en = true; break;
+
+            case 'H': mulh = true; break;
 
             case 'h': host = true; break;
 
@@ -1010,6 +1015,9 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
 
     // AMO enable flag
     p->amo_en = amo_en;
+
+    // MULH enable flag
+    p->mulh = mulh;
 
     // BlackParrot Host
     p->host = host;
