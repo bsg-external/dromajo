@@ -131,7 +131,7 @@ struct RISCVMachine {
 #define CLINT_SIZE      0x000c0000
 
 // These must be kept up to date with the RTL code and SDK aviary.h
-#define PARAM_ROM_BASE_ADDR 0x20000
+#define PARAM_ROM_BASE_ADDR 0x120000
 #define PARAM_ROM_SIZE 0x012C
 #define PARAM_CC_X_DIM 0x0000
 #define PARAM_CC_Y_DIM 0x0004
