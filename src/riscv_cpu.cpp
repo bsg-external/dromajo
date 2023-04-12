@@ -1746,7 +1746,7 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
 #if FLEN >= 128
     s->misa |= MCPUID_Q;
 #endif
-    //s->misa |= MCPUID_C;
+    s->misa |= MCPUID_C;
 
     if (machine->custom_extension)
         s->misa |= MCPUID_X;
