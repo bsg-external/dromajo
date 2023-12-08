@@ -563,7 +563,7 @@ static void usage(const char *prog, const char *msg) {
             "       --ignore_sbi_shutdown continue simulation even upon seeing the SBI_SHUTDOWN call\n"
             "       --dump_memories dump memories that could be used to load a cosimulation\n"
             "       --memory_size sets the memory size in MiB (default 256 MiB)\n"
-            "       --memory_addr sets the memory start address (default 0x%lx)\n"
+            "       --memory_addr sets the memory start address (default 0x%lux)\n"
             "       --bootrom load in a bootrom img file (default is dromajo bootrom)\n"
             "       --dtb load in a dtb file (default is dromajo dtb)\n"
             "       --compact_bootrom have dtb be directly after bootrom (default 256B after boot base)\n"
@@ -571,6 +571,7 @@ static void usage(const char *prog, const char *msg) {
             "       --plic START:SIZE set PLIC start address and size in B (defaults to 0x%lx:0x%lx)\n"
             "       --clint START:SIZE set CLINT start address and size in B (defaults to 0x%lx:0x%lx)\n"
             "       --custom_extension add X extension to misa for all cores\n"
+            "       --checkpoint_period creates a checkpoint evey N instructions\n"
 #ifdef LIVECACHE
             "       --live_cache_size live cache warmup for checkpoint (default 8M)\n"
 #endif
@@ -578,8 +579,8 @@ static void usage(const char *prog, const char *msg) {
             msg,
             CONFIG_VERSION,
             prog,
-            (long)BOOT_BASE_ADDR,
             (long)RAM_BASE_ADDR,
+            (long)BOOT_BASE_ADDR,
             (long)PLIC_BASE_ADDR,
             (long)PLIC_SIZE,
             (long)CLINT_BASE_ADDR,
@@ -631,6 +632,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     uint64_t    clint_base_addr_override = 0;
     uint64_t    clint_size_override      = 0;
     bool        custom_extension         = false;
+    uint64_t    checkpoint_period        = 0;
     const char *simpoint_file            = 0;
     bool        clear_ids                = false;
 #ifdef LIVECACHE
@@ -666,6 +668,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"plic",                    required_argument, 0,  'p' }, // CFG
             {"clint",                   required_argument, 0,  'C' }, // CFG
             {"custom_extension",              no_argument, 0,  'u' }, // CFG
+            {"checkpoint_period",       required_argument, 0,  'e' },
             {"clear_ids",                     no_argument, 0,  'L' }, // CFG
             {"ctrlc",                         no_argument, 0,  'X' },
 #ifdef LIVECACHE
@@ -811,6 +814,20 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
 
             case 'u': custom_extension = true; break;
 
+            case 'e':
+                if(checkpoint_period)
+                    usage(prog, "already had a checkpoint period");
+                checkpoint_period = (uint64_t)atoll(optarg);
+                {
+                    char last = optarg[strlen(optarg) - 1];
+                    if (last == 'k' || last == 'K')
+                        checkpoint_period *= 1000;
+                    else if (last == 'm' || last == 'M')
+                        checkpoint_period *= 1000000;
+                    else if (last == 'g' || last == 'G')
+                        checkpoint_period *= 1000000000;
+                }
+                break;
             case 'L': clear_ids = true; break;
 
 #ifdef LIVECACHE
@@ -980,6 +997,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
         p->plic_size = plic_size_override;
 
     // CLINT params
+    p->clint_size = CLINT_SIZE + ((p->ncpus - 1) << CORE_SHIFT);
     if (clint_base_addr_override)
         p->clint_base_addr = clint_base_addr_override;
     if (clint_size_override)
@@ -988,6 +1006,9 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     // core modifications
     p->custom_extension = custom_extension;
     p->clear_ids        = clear_ids;
+
+    // Checkpoint Period
+    p->checkpoint_period = checkpoint_period;
 
     RISCVMachine *s = virt_machine_init(p);
     if (!s)

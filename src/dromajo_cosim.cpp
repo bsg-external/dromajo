@@ -48,8 +48,10 @@ dromajo_cosim_state_t *dromajo_cosim_init(int argc, char *argv[]) {
 #endif
 
     m->common.cosim             = true;
-    m->common.pending_interrupt = -1;
-    m->common.pending_exception = -1;
+    for (int i = 0; i < m->ncpus; i++) {
+        m->cpu_state[i]->pending_interrupt = -1;
+        m->cpu_state[i]->pending_exception = -1;
+    }
 
     return (dromajo_cosim_state_t *)m;
 }
@@ -163,16 +165,16 @@ static inline void handle_dut_overrides(RISCVCPUState *s, int priv, uint64_t pc,
  * MSB indicates an asynchronous interrupt, synchronous exception
  * otherwise.
  */
-void dromajo_cosim_raise_trap(dromajo_cosim_state_t *state, int hartid, int64_t cause) {
-    VirtMachine *m = (VirtMachine *)state;
+void dromajo_cosim_raise_trap(dromajo_cosim_state_t *state, int hartid, int64_t cause, bool verbose) {
+    RISCVMachine *r = (RISCVMachine *)state;
 
     if (cause < 0) {
-        assert(m->pending_interrupt == -1);
-        m->pending_interrupt = cause & 63;
-        (m->debug_log)(hartid, "[DEBUG] DUT raised interrupt %d\n", m->pending_interrupt);
+        assert(r->cpu_state[hartid]->pending_interrupt == -1);
+        r->cpu_state[hartid]->pending_interrupt = cause & 63;
+        (r->common.debug_log)(hartid, "[DEBUG] DUT raised interrupt %d\n", r->cpu_state[hartid]->pending_interrupt);
     } else {
-        m->pending_exception = cause;
-        (m->debug_log)(hartid, "[DEBUG] DUT raised exception %d\n", m->pending_exception);
+        r->cpu_state[hartid]->pending_exception = cause;
+        (r->common.debug_log)(hartid, "[DEBUG] DUT raised exception %d\n", r->cpu_state[hartid]->pending_exception);
     }
 }
 
@@ -192,7 +194,7 @@ void dromajo_cosim_raise_trap(dromajo_cosim_state_t *state, int hartid, int64_t 
  * with the expected values.
  */
 int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc, uint32_t dut_insn, uint64_t dut_wdata,
-                       uint64_t dut_mstatus, bool check) {
+                       uint64_t dut_mstatus, bool check, bool verbose) {
     RISCVMachine *r = (RISCVMachine *)state;
     assert(r->ncpus > hartid);
     RISCVCPUState *s = r->cpu_state[hartid];
@@ -202,7 +204,6 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
     uint32_t       emu_insn;
     bool           emu_wrote_data = false;
     int            exit_code      = 0;
-    bool           verbose        = true;
     int            iregno, fregno;
     char           log_buffer[512];
     int            log_buff_space;
@@ -231,6 +232,12 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
         emu_pc   = riscv_get_pc(s);
         riscv_read_insn(s, &emu_insn, emu_pc);
 
+        // DWP: Do not check in debug mode
+        if (s->debug_mode) {
+            riscv_cpu_interp64(s, 1);
+            continue;
+        }
+
         if ((emu_insn & 3) != 3)
             emu_insn &= 0xFFFF;
 
@@ -243,16 +250,16 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
             break;
         }
 
-        if (r->common.pending_interrupt != -1 && r->common.pending_exception != -1) {
+        if (r->cpu_state[hartid]->pending_interrupt != -1 && r->cpu_state[hartid]->pending_exception != -1) {
             /* On the DUT, the interrupt can race the exception.
                Let's try to match that behavior */
 
-            (m.debug_log)(hartid, "[DEBUG] DUT also raised exception %d\n", r->common.pending_exception);
+            (m.debug_log)(hartid, "[DEBUG] DUT also raised exception %d\n", r->cpu_state[hartid]->pending_exception);
             riscv_cpu_interp64(s, 1);  // Advance into the exception
 
             int cause = s->priv == PRV_S ? s->scause : s->mcause;
 
-            if (r->common.pending_exception != cause) {
+            if (r->cpu_state[hartid]->pending_exception != cause) {
                 char priv = s->priv["US?M"];
 
                 /* Unfortunately, handling the error case is awkward,
@@ -261,16 +268,16 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
                 log_buff_space = snprintf(log_buffer, 512, "%d 0x%016" PRIx64 " ", emu_priv, emu_pc);
                 log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, " (0x%08x) ", emu_insn);
                 log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "[error] EMU %cCAUSE %d != DUT %cCAUSE %d\n",
-                                                                          priv, cause, priv, r->common.pending_exception);
+                                                                          priv, cause, priv, r->cpu_state[hartid]->pending_exception);
                 (m.error_log)(hartid, log_buffer);
 
                 return 0x1FFF;
             }
         }
 
-        if (r->common.pending_interrupt != -1) {
-            riscv_cpu_set_mip(s, riscv_cpu_get_mip(s) | 1 << r->common.pending_interrupt);
-            (m.debug_log)(hartid, "[DEBUG] Interrupt: MIP <- %d: Now MIP = %x\n", r->common.pending_interrupt,
+        if (r->cpu_state[hartid]->pending_interrupt != -1) {
+            riscv_cpu_set_mip(s, riscv_cpu_get_mip(s) | 1 << r->cpu_state[hartid]->pending_interrupt);
+            (m.debug_log)(hartid, "[DEBUG] Interrupt: MIP <- %d: Now MIP = %x\n", r->cpu_state[hartid]->pending_interrupt,
                           riscv_cpu_get_mip(s));
         }
 
@@ -285,8 +292,8 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
             break;
         }
 
-        r->common.pending_interrupt = -1;
-        r->common.pending_exception = -1;
+        r->cpu_state[hartid]->pending_interrupt = -1;
+        r->cpu_state[hartid]->pending_exception = -1;
     }
 
 #ifdef GOLDMEM_INORDER
@@ -419,7 +426,8 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
 
     if (verbose)
         log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, " DASM(0x%08x)\n", emu_insn);
-    (m.debug_log)(hartid, log_buffer);
+    // Causes segfault
+    //(m.debug_log)(hartid, log_buffer);
 
     if (!check)
         return 0;
@@ -431,15 +439,17 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
      * varies between pre-commit (all FP instructions) and post-commit
      * (CSR instructions).
      */
-    if (emu_pc != dut_pc || emu_insn != dut_insn && (emu_insn & 3) == 3 ||  // DUT expands all C instructions
-        emu_wdata != dut_wdata && emu_wrote_data) {
+    if (emu_pc      != dut_pc                           ||
+        emu_insn    != dut_insn  && (emu_insn & 3) == 3 || // DUT expands all C instructions
+        //emu_mstatus != dut_mstatus                      ||
+        emu_wdata   != dut_wdata && emu_wrote_data) {
         (m.error_log)(hartid, "[error] EMU PC %016" PRIx64 ", DUT PC %016" PRIx64 "\n", emu_pc, dut_pc);
         (m.error_log)(hartid, "[error] EMU INSN %08x, DUT INSN %08x\n", emu_insn, dut_insn);
         if (emu_wrote_data)
             (m.error_log)(hartid, "[error] EMU WDATA %016" PRIx64 ", DUT WDATA %016" PRIx64 "\n", emu_wdata, dut_wdata);
         (m.error_log)(hartid, "[error] EMU MSTATUS %08" PRIx64 ", DUT MSTATUS %08" PRIx64 "\n", emu_mstatus, dut_mstatus);
         (m.error_log)(hartid, "[error] DUT pending exception %d pending interrupt %d\n",
-                               r->common.pending_exception, r->common.pending_interrupt);
+                               r->cpu_state[hartid]->pending_exception, r->cpu_state[hartid]->pending_interrupt);
         exit_code = 0x1FFF;
     }
 

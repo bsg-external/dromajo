@@ -240,6 +240,7 @@ typedef struct RISCVCPUState {
                            * simulation */
     BOOL         terminate_simulation;
     int          pending_exception; /* used during MMU exception handling */
+    int          pending_interrupt;
     target_ulong pending_tval;
 
     /* CSRs */
@@ -368,6 +369,10 @@ void riscv_cpu_deserialize(RISCVCPUState *s, const char *dump_name);
 
 int riscv_cpu_read_memory(RISCVCPUState *s, mem_uint_t *pval, target_ulong addr, int size_log2);
 int riscv_cpu_write_memory(RISCVCPUState *s, target_ulong addr, mem_uint_t val, int size_log2);
+
+void serialize_memory(const void *base, size_t size, const char *file);
+void deserialize_memory(void *base, size_t size, const char *file);
+void create_boot_rom(RISCVMachine *m, const char *file, const uint64_t clint_base_addr);
 
 #define PHYS_MEM_READ_WRITE(size, uint_type)                                              \
     void      riscv_phys_write_u##size(RISCVCPUState *, target_ulong, uint_type, bool *); \

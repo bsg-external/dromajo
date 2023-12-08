@@ -40,6 +40,9 @@
 #ifndef RISCV_MACHINE_H
 #define RISCV_MACHINE_H
 
+#include <queue>
+#include <thread>
+
 #include "machine.h"
 #include "riscv_cpu.h"
 #include "virtio.h"
@@ -48,7 +51,7 @@
 #include "LiveCacheCore.h"
 #endif
 
-#define MAX_CPUS 8
+#define MAX_CPUS 32
 
 /* Hooks */
 typedef struct RISCVMachineHooks {
@@ -112,17 +115,38 @@ struct RISCVMachine {
 
     /* Extension state, not used by Dromajo itself */
     void *ext_state;
+
+    /* Periodically create checkpoints */
+    uint64_t checkpoint_period;
 };
 
 #define PLIC_BASE_ADDR 0x10000000
 #define PLIC_SIZE      0x2000000
 
-#define CLINT_BASE_ADDR 0x02000000
+#define CLINT_BASE_ADDR 0x00300000
 #define CLINT_SIZE      0x000c0000
+
+// These must be kept up to date with the RTL code and SDK aviary.h
+#define PARAM_ROM_BASE_ADDR 0x120000
+#define PARAM_ROM_SIZE 0x012C
+#define PARAM_CC_X_DIM 0x0000
+#define PARAM_CC_Y_DIM 0x0004
+
+#define HOST_BASE_ADDR 0x00100000
+#define HOST_SIZE      0x00100000
+#define HOST_GETCHAR   0x0
+#define HOST_PUTCHAR   0x1000
+#define HOST_FINISH    0x2000
+
+#define OFFSET_MASK  0x00000FFFFF
+#define DEVICE_MASK  0x0000F00000
+#define CORE_MASK    0xFFFF000000
+#define DEVICE_SHIFT 20
+#define CORE_SHIFT   24
 
 // CPU_FREQUENCY is a u32, so less than 4GHz
 #define CPU_FREQUENCY 2000000000
-#define RTC_FREQ      1000000
+#define RTC_FREQ      125000000
 
 #define RTC_FREQ_DIV (CPU_FREQUENCY / RTC_FREQ)
 

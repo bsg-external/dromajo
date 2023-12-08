@@ -139,6 +139,16 @@ static int iterate_core(RISCVMachine *m, int hartid, int n_cycles) {
     bool     do_trace = false;
 
     (void)riscv_read_insn(cpu, &insn_raw, last_pc);
+
+    uint64_t instret = m->common.maxinsns;
+    uint64_t period  = m->checkpoint_period;
+    if(period != 0 && (instret % period == 0) &&
+       m->common.snapshot_save_name && !cpu->debug_mode) {
+        std::string name = std::string(m->common.snapshot_save_name);
+        name += '.' + std::to_string(instret);
+        virt_machine_serialize(m, name.c_str());
+    }
+
     if (m->common.trace < (unsigned) n_cycles) {
         n_cycles = 1;
         do_trace = true;

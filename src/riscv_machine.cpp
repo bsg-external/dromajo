@@ -185,6 +185,100 @@ static void uart_write(void *opaque, uint32_t offset, uint32_t val, int size_log
     vm_error("%s: bad write: addr=0x%x v=0x%x\n", __func__, (int)offset, (int)val);
 }
 
+std::queue<int> getchar_fifo;
+std::vector<bool>* core_finish;
+
+void host_monitor()
+{
+  int c;
+  while(1) {
+      c = getchar();
+      if(c != -1) {
+        getchar_fifo.push(c);
+      }
+  }
+}
+
+void host_init(RISCVMachine* m) {
+  core_finish = new std::vector<bool>(m->ncpus, false);
+  if (!m->common.cosim) {
+    while(!getchar_fifo.empty())
+        getchar_fifo.pop();
+    std::thread t(&host_monitor);
+    t.detach();
+  }
+}
+
+static uint32_t host_read(void *opaque, uint32_t offset, int size_log2) {
+  int c = -1;
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  if(!m->common.cosim && offset == HOST_GETCHAR && !getchar_fifo.empty()) {
+    c = getchar_fifo.front();
+    getchar_fifo.pop();
+  }
+  return c;
+}
+
+static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  if (m->common.cosim)
+      return;
+  if(offset == HOST_PUTCHAR) {
+    printf("%c", val);
+    fflush(stdout);
+  }
+  else if((offset & 0xf000) == HOST_FINISH) {
+    int hartid = (offset - HOST_FINISH) >> 3;
+    core_finish->at(hartid) = true;
+
+    const char* pass_fail = (val == 0)? "PASS" : "FAIL";
+    printf("[CORE%d FSH] %s\n", hartid, pass_fail);
+    printf("\tinstret: %lud\n", m->cpu_state[hartid]->minstret);
+
+    for(int i=0; i < m->ncpus; i++)
+      if(core_finish->at(i) == false)
+        return;
+    exit(0);
+  }
+}
+
+static uint32_t param_rom_read(void *opaque, uint32_t offset, int size_log2) {
+  // Hard-coded for supported BP configurations
+  // Only implement CC_X_DIM and CC_Y_DIM since those are only used by test programs
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  if (offset == PARAM_CC_X_DIM) {
+    if (m->ncpus == 1) return 1;
+    if (m->ncpus == 2) return 2;
+    if (m->ncpus == 3) return 3;
+    if (m->ncpus == 4) return 2;
+    if (m->ncpus == 6) return 3;
+    if (m->ncpus == 8) return 4;
+    if (m->ncpus == 12) return 4;
+    if (m->ncpus == 16) return 4;
+  }
+  else if (offset == PARAM_CC_Y_DIM) {
+    if (m->ncpus == 1) return 1;
+    if (m->ncpus == 2) return 1;
+    if (m->ncpus == 3) return 1;
+    if (m->ncpus == 4) return 2;
+    if (m->ncpus == 6) return 2;
+    if (m->ncpus == 8) return 2;
+    if (m->ncpus == 12) return 3;
+    if (m->ncpus == 16) return 4;
+  }
+  else if (offset > PARAM_ROM_SIZE) {
+    vm_error("param_rom_read to address beyond ROM: PARAM_ROM_BASE_ADDR+0x%x\n", offset);
+  }
+  else {
+    vm_error("param_rom_read to unimplemented address PARAM_ROM_BASE_ADDR+0x%x\n", offset);
+  }
+  return -1;
+}
+
+static void param_rom_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
+  // Just a stub, param ROM is read-only, do nothing
+}
+
 /* CLINT registers
  * 0000 msip hart 0
  * 0004 msip hart 1
@@ -196,12 +290,11 @@ static void uart_write(void *opaque, uint32_t offset, uint32_t val, int size_log
  * bffc mtime hi
  */
 
-static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2) {
+static uint32_t clint_read_slice(void *opaque, uint32_t offset, int size_log2, int hartid) {
     RISCVMachine *m = (RISCVMachine *)opaque;
     uint32_t      val;
 
     if (0 <= offset && offset < 0x4000) {
-        int hartid = offset >> 2;
         if (m->ncpus <= hartid) {
             vm_error("%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
             val = 0;
@@ -215,7 +308,6 @@ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2) {
         uint64_t mtime = m->cpu_state[0]->mcycle / RTC_FREQ_DIV;
         val            = mtime >> 32;
     } else if (0x4000 <= offset && offset < 0xbff8) {
-        int hartid = (offset - 0x4000) >> 3;
         if (m->ncpus <= hartid) {
             vm_error("%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
             val = 0;
@@ -243,7 +335,7 @@ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2) {
     return val;
 }
 
-static void clint_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
+static void clint_write_slice(void *opaque, uint32_t offset, uint32_t val, int size_log2, int hartid) {
     RISCVMachine *m = (RISCVMachine *)opaque;
 
     switch (size_log2) {
@@ -254,7 +346,6 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val, int size_lo
     }
 
     if (0 <= offset && offset < 0x4000) {
-        int hartid = offset >> 2;
         if (m->ncpus <= hartid) {
             vm_error("%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
         } else if (val & 1)
@@ -270,7 +361,6 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val, int size_lo
         mtime                   = (mtime & 0x00000000FFFFFFFFL) + ((uint64_t)val << 32);
         m->cpu_state[0]->mcycle = mtime * RTC_FREQ_DIV;
     } else if (0x4000 <= offset && offset < 0xbff8) {
-        int hartid = (offset - 0x4000) >> 3;
         if (m->ncpus <= hartid) {
             vm_error("%s: MSIP access for hartid:%d which is beyond ncpus\n", __func__, hartid);
         } else if ((offset >> 2) & 1) {
@@ -288,6 +378,21 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val, int size_lo
 #ifdef DUMP_CLINT
     vm_error("clint_write: offset=%x val=%x\n", offset, val);
 #endif
+}
+
+static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
+{
+    int hartid = (offset >> CORE_SHIFT);
+    uint32_t slice_offset = offset & OFFSET_MASK;
+    return clint_read_slice(opaque, slice_offset, size_log2, hartid);
+}
+
+static void clint_write(void *opaque, uint32_t offset, uint32_t val,
+                        int size_log2)
+{
+    int hartid = (offset >> CORE_SHIFT);
+    uint32_t slice_offset = offset & OFFSET_MASK;
+    return clint_write_slice(opaque, slice_offset, val, size_log2, hartid);
 }
 
 static void plic_update_mip(RISCVMachine *s, int hartid) {
@@ -1180,6 +1285,9 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     /* add custom extension bit to misa */
     s->custom_extension = p->custom_extension;
 
+    /* Set periodic checkpoint interval */
+    s->checkpoint_period = p->checkpoint_period;
+
     s->plic_base_addr  = p->plic_base_addr;
     s->plic_size       = p->plic_size;
     s->clint_base_addr = p->clint_base_addr;
@@ -1198,7 +1306,7 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
 
     /* RAM */
     cpu_register_ram(s->mem_map, s->ram_base_addr, s->ram_size, 0);
-    cpu_register_ram(s->mem_map, ROM_BASE_ADDR, ROM_SIZE, 0);
+    cpu_register_ram(s->mem_map, ROM_BASE_ADDR, (ROM_SIZE * s->ncpus), 0);
 
     for (int i = 0; i < s->ncpus; ++i) {
         s->cpu_state[i]->physical_addr_len = p->physical_addr_len;
@@ -1239,6 +1347,20 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
                         clint_write,
                         DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
     cpu_register_device(s->mem_map, p->plic_base_addr, p->plic_size, s, plic_read, plic_write, DEVIO_SIZE32);
+
+    //BlackParrot Host
+    host_init(s);
+    cpu_register_device(s->mem_map, HOST_BASE_ADDR, HOST_SIZE, s,
+                        host_read, host_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
+
+    // BlackParrot Parameter ROM
+    cpu_register_device(s->mem_map,
+                        PARAM_ROM_BASE_ADDR,
+                        PARAM_ROM_SIZE,
+                        s,
+                        param_rom_read,
+                        param_rom_write,
+                        DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
     for (int j = 1; j < 32; j++) {
         irq_init(&s->plic_irq[j], plic_set_irq, s, j);
@@ -1330,8 +1452,10 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
 
     /* interrupts and exception setup for cosim */
     s->common.cosim             = false;
-    s->common.pending_exception = -1;
-    s->common.pending_interrupt = -1;
+    for (int i = 0; i < s->ncpus; ++i) {
+        s->cpu_state[i]->pending_exception = -1;
+        s->cpu_state[i]->pending_interrupt = -1;
+    }
 
     /* plic/clint setup */
     s->plic_base_addr  = p->plic_base_addr;
@@ -1366,7 +1490,7 @@ RISCVMachine *virt_machine_load(const VirtMachineParams *p, RISCVMachine *s) {
         }
 
         uint8_t *ram_ptr = get_ram_ptr(s, ROM_BASE_ADDR);
-        for (int i = 0; i < ROM_SIZE / 4; ++i) {
+        for (int i = 0; i < (ROM_SIZE * s->ncpus) / 4; ++i) {
             uint32_t *q_base = (uint32_t *)(ram_ptr + (BOOT_BASE_ADDR - ROM_BASE_ADDR));
             fprintf(f, "@%06x %08x\n", i, q_base[i]);
         }
@@ -1402,8 +1526,9 @@ RISCVMachine *virt_machine_load(const VirtMachineParams *p, RISCVMachine *s) {
 }
 
 void virt_machine_end(RISCVMachine *s) {
-    if (s->common.snapshot_save_name)
+    if (s->common.snapshot_save_name && s->checkpoint_period == 0) {
         virt_machine_serialize(s, s->common.snapshot_save_name);
+    }
 
     /* XXX: stop all */
     for (int i = 0; i < s->ncpus; ++i) {
@@ -1415,19 +1540,48 @@ void virt_machine_end(RISCVMachine *s) {
 }
 
 void virt_machine_serialize(RISCVMachine *m, const char *dump_name) {
-    RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
+    //RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
 
-    vm_error("plic: %x %x timecmp=%llx\n", m->plic_pending_irq, m->plic_served_irq, (unsigned long long)s->timecmp);
+    //vm_error("plic: %x %x timecmp=%llx\n", m->plic_pending_irq, m->plic_served_irq, (unsigned long long)s->timecmp);
 
-    assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
-    riscv_cpu_serialize(s, dump_name, m->clint_base_addr);
+    //assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
+    //riscv_cpu_serialize(s, dump_name, m->clint_base_addr);
+    fprintf(dromajo_stderr, "creating a new boot rom\n");
+    for (int i = m->mem_map->n_phys_mem_range - 1; i >= 0; --i) {
+        PhysMemoryRange *pr = &m->mem_map->phys_mem_range[i];
+
+        if (pr->is_ram && pr->addr == ROM_BASE_ADDR) {
+            char *boot_name = (char *)alloca(strlen(dump_name) + 64);
+            sprintf(boot_name, "%s.bootram", dump_name);
+            create_boot_rom(m, boot_name, m->clint_base_addr);
+        }
+        else if (pr->is_ram && pr->addr == m->ram_base_addr) {
+            char *main_name = (char *)alloca(strlen(dump_name) + 64);
+            sprintf(main_name, "%s.mainram", dump_name);
+            serialize_memory(pr->phys_mem, pr->size, main_name);
+        }
+    }
 }
 
 void virt_machine_deserialize(RISCVMachine *m, const char *dump_name) {
-    RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
+    //RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
+    //
+    //assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
+    //riscv_cpu_deserialize(s, dump_name);
+    for (int i = m->mem_map->n_phys_mem_range - 1; i >= 0; --i) {
+        PhysMemoryRange *pr = &m->mem_map->phys_mem_range[i];
 
-    assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
-    riscv_cpu_deserialize(s, dump_name);
+        if (pr->is_ram && pr->addr == ROM_BASE_ADDR) {
+            char *boot_name = (char *)alloca(strlen(dump_name) + 64);
+            sprintf(boot_name, "%s.bootram", dump_name);
+            deserialize_memory(pr->phys_mem, pr->size, boot_name);
+        }
+        else if (pr->is_ram && pr->addr == m->ram_base_addr) {
+            char *main_name = (char *)alloca(strlen(dump_name) + 64);
+            sprintf(main_name, "%s.mainram", dump_name);
+            deserialize_memory(pr->phys_mem, pr->size, main_name);
+        }
+    }
 }
 
 int virt_machine_get_sleep_duration(RISCVMachine *m, int hartid, int ms_delay) {

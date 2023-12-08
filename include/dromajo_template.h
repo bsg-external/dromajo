@@ -270,7 +270,7 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
     insn_counter_addend = s->insn_counter + n_cycles;
 
     /* check pending interrupts */
-    if (unlikely(((s->mip & s->mie) != 0) && (s->machine->common.pending_interrupt != -1 || !s->machine->common.cosim))) {
+    if (unlikely(((s->mip & s->mie) != 0) && (s->pending_interrupt != -1 || !s->machine->common.cosim))) {
         if (raise_interrupt(s)) {
             --insn_counter_addend;
             goto done_interp;
@@ -302,7 +302,7 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
             target_ulong addr;
 
             /* check pending interrupts */
-            if (unlikely(((s->mip & s->mie) != 0) && (s->machine->common.pending_interrupt != -1 || !s->machine->common.cosim))) {
+            if (unlikely(((s->mip & s->mie) != 0) && (s->pending_interrupt != -1 || !s->machine->common.cosim))) {
                 if (raise_interrupt(s)) {
                     goto the_end;
                 }
@@ -1233,7 +1233,7 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                                     goto illegal_insn;
                                 /* go to power down if no enabled interrupts are
                                    pending */
-                                if (((s->mip & s->mie) == 0) && (s->machine->common.pending_interrupt == -1)
+                                if (((s->mip & s->mie) == 0) && (s->pending_interrupt == -1)
                                     || !s->machine->common.cosim) {
                                     s->power_down_flag = TRUE;
                                     s->pc              = GET_PC() + 4;
@@ -1301,6 +1301,10 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                     goto illegal_insn;                                                  \
                 if (target_read_u##size(s, &rval, addr))                                \
                     goto mmu_exception;                                                 \
+                /* Clobber other CPUs reservations */                                   \
+                for(int i=0; i < s->machine->ncpus; i++)                                \
+                    if(s->machine->cpu_state[i]->load_res == addr)                      \
+                        s->machine->cpu_state[i]->load_res = ~0;                        \
                 val         = (int##size##_t)rval;                                      \
                 s->load_res = addr;                                                     \
                 s->load_res_memseqno = s->machine->memseqno;                            \
@@ -1810,17 +1814,17 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
     } /* end of main loop */
 illegal_insn:
     s->pending_exception = CAUSE_ILLEGAL_INSTRUCTION;
-    s->pending_tval      = 0;
+    s->pending_tval      = insn;
 mmu_exception:
 exception:
     s->pc = GET_PC();
     if (s->pending_exception >= 0) {
-        if (s->pending_exception < CAUSE_USER_ECALL || s->pending_exception > CAUSE_USER_ECALL + 3) {
+        //if (s->pending_exception < CAUSE_USER_ECALL || s->pending_exception > CAUSE_USER_ECALL + 3) {
             /* All other causes cancelled the instruction and shouldn't be
              * counted in minstret */
             --insn_counter_addend;
             --insn_executed;
-        }
+        //}
 
         raise_exception2(s, s->pending_exception, s->pending_tval);
     }

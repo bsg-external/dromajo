@@ -80,6 +80,10 @@ if (SIMPOINT)
     )
 endif ()
 
+add_link_options(
+        -pthread
+)
+
 # Set Version Header
 set(CONFIG_VERSION "Dromajo-0.1")
 configure_file(include/config.h.in config.h @ONLY)
