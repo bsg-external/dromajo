@@ -50,6 +50,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <err.h>
 
 #include "cutils.h"
 #include "dromajo.h"
@@ -65,7 +66,7 @@
 //#define DUMP_PLIC
 //#define DUMP_DTB
 
-#define USE_SIFIVE_UART
+//#define USE_SIFIVE_UART
 
 enum {
     SIFIVE_UART_TXFIFO = 0,
@@ -92,6 +93,22 @@ enum {
 
 static uint64_t rtc_get_time(RISCVMachine *m) { return m->cpu_state[0]->mcycle / RTC_FREQ_DIV; }
 
+void dromajo_default_error_log(int hartid, const char *fmt, ...) {
+    va_list args;
+
+    va_start(args, fmt);
+    vfprintf(dromajo_stderr, fmt, args);
+    va_end(args);
+}
+
+void dromajo_default_debug_log(int hartid, const char *fmt, ...) {
+    va_list args;
+
+    va_start(args, fmt);
+    vfprintf(dromajo_stderr, fmt, args);
+    va_end(args);
+}
+
 typedef struct SiFiveUARTState {
     CharacterDevice *cs;  // Console
     uint32_t         irq;
@@ -112,16 +129,6 @@ static void uart_update_irq(SiFiveUARTState *s) {
     if (cond) {
         vm_error("uart_update_irq: FIXME we should raise IRQ saying that there is new data\n");
     }
-}
-
-static uint32_t mmio_read(void *opaque, uint32_t offset, int size_log2) {
-    vm_error("mmio_read: offset=%x size_log2=%d\n", offset, size_log2);
-
-    return 0;
-}
-
-static void mmio_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
-    vm_error("mmio_write: offset=%x size_log2=%d val=%x\n", offset, size_log2, val);
 }
 
 static uint32_t uart_read(void *opaque, uint32_t offset, int size_log2) {
@@ -390,10 +397,15 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val,
 static void plic_update_mip(RISCVMachine *s, int hartid) {
     uint32_t       mask = s->plic_pending_irq & ~s->plic_served_irq;
     RISCVCPUState *cpu  = s->cpu_state[hartid];
-    if (mask) {
-        riscv_cpu_set_mip(cpu, MIP_MEIP | MIP_SEIP);
-    } else {
-        riscv_cpu_reset_mip(cpu, MIP_MEIP | MIP_SEIP);
+
+    for (int ctx = 0; ctx < 2; ++ctx) {
+        unsigned mip_mask = ctx == 0 ? MIP_SEIP : MIP_MEIP;
+
+        if (mask & cpu->plic_enable_irq[ctx]) {
+            riscv_cpu_set_mip(cpu, mip_mask);
+        } else {
+            riscv_cpu_reset_mip(cpu, mip_mask);
+        }
     }
 }
 
@@ -405,7 +417,7 @@ static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2) {
 
     assert(size_log2 == 2);
     if (PLIC_PRIORITY_BASE <= offset && offset < PLIC_PRIORITY_BASE + (PLIC_NUM_SOURCES << 2)) {
-        uint32_t irq = ((offset - PLIC_PRIORITY_BASE) >> 2) + 1;
+        uint32_t irq = (offset - PLIC_PRIORITY_BASE) >> 2;
         assert(irq < PLIC_NUM_SOURCES);
         val = plic_priority[irq];
     } else if (PLIC_PENDING_BASE <= offset && offset < PLIC_PENDING_BASE + (PLIC_NUM_SOURCES >> 3)) {
@@ -419,7 +431,7 @@ static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2) {
         if (hartid < s->ncpus) {
             // uint32_t wordid = (offset & (PLIC_ENABLE_STRIDE-1)) >> 2;
             RISCVCPUState *cpu = s->cpu_state[hartid];
-            val                = cpu->plic_enable_irq;
+            val                = cpu->plic_enable_irq[addrid % 2];
         } else {
             val = 0;
         }
@@ -428,13 +440,14 @@ static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2) {
         uint32_t wordid = (offset & (PLIC_CONTEXT_STRIDE - 1)) >> 2;
         if (wordid == 0) {
             val = 0;  // target_priority in qemu
-        } else if (wordid == 4) {
+        } else if (wordid == 1) {
             uint32_t mask = s->plic_pending_irq & ~s->plic_served_irq;
             if (mask != 0) {
                 int i = ctz32(mask);
                 s->plic_served_irq |= 1 << i;
+                s->plic_pending_irq &= ~(1 << i);
                 plic_update_mip(s, hartid);
-                val = i + 1;
+                val = i;
             } else {
                 val = 0;
             }
@@ -455,7 +468,7 @@ static void plic_write(void *opaque, uint32_t offset, uint32_t val, int size_log
 
     assert(size_log2 == 2);
     if (PLIC_PRIORITY_BASE <= offset && offset < PLIC_PRIORITY_BASE + (PLIC_NUM_SOURCES << 2)) {
-        uint32_t irq = ((offset - PLIC_PRIORITY_BASE) >> 2) + 1;
+        uint32_t irq = (offset - PLIC_PRIORITY_BASE) >> 2;
         assert(irq < PLIC_NUM_SOURCES);
         plic_priority[irq] = val & 7;
 
@@ -467,17 +480,16 @@ static void plic_write(void *opaque, uint32_t offset, uint32_t val, int size_log
         if (hartid < s->ncpus) {
             // uint32_t wordid = (offset & (PLIC_ENABLE_STRIDE - 1)) >> 2;
             RISCVCPUState *cpu   = s->cpu_state[hartid];
-            cpu->plic_enable_irq = val;
+            cpu->plic_enable_irq[addrid % 2] = val;
         }
     } else if (PLIC_CONTEXT_BASE <= offset && offset < PLIC_CONTEXT_BASE + PLIC_CONTEXT_STRIDE * MAX_CPUS) {
         uint32_t hartid = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_STRIDE;
         uint32_t wordid = (offset & (PLIC_CONTEXT_STRIDE - 1)) >> 2;
         if (wordid == 0) {
             plic_priority[wordid] = val;
-        } else if (wordid == 4) {
+        } else if (wordid == 1) {
             int irq = val & 31;
-            vm_error("plic_write: hartid=%d claim wordid=%d offset=%x val=%x irq=%d\n", hartid, wordid, offset, val, irq);
-            uint32_t mask = 1 << (irq - 1);
+            uint32_t mask = 1 << irq;
             s->plic_served_irq &= ~mask;
         } else {
             vm_error("plic_write: hartid=%d ERROR?? unexpected wordid=%d offset=%x val=%x\n", hartid, wordid, offset, val);
@@ -493,7 +505,7 @@ static void plic_write(void *opaque, uint32_t offset, uint32_t val, int size_log
 static void plic_set_irq(void *opaque, int irq_num, int state) {
     RISCVMachine *m = (RISCVMachine *)opaque;
 
-    uint32_t mask = 1 << (irq_num - 1);
+    uint32_t mask = 1 << irq_num;
 
     if (state)
         m->plic_pending_irq |= mask;
@@ -750,7 +762,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst, const char *dtb_name, 
     int       size;
     if (!dtb_name) {
         int       intc_phandle = 0;
-        int       max_xlen, i, cur_phandle, plic_phandle;
+        int       max_xlen, i, cur_phandle;
         char      isa_string[128], *q;
         uint32_t  misa;
         uint32_t  tab[4 * MAX_CPUS];
@@ -860,7 +872,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst, const char *dtb_name, 
 
         fdt_prop_tab_u32(s, "interrupts-extended", tab, m->ncpus * 4);
 
-        plic_phandle = cur_phandle++;
+        int plic_phandle = cur_phandle++;
         fdt_prop_u32(s, "phandle", plic_phandle);
 
         fdt_end_node(s); /* plic */
@@ -883,17 +895,30 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst, const char *dtb_name, 
         fdt_end_node(s); /* uart */
 #endif
 
-        // Fake Synopsys™ DesignWare™ ABP™ UART (NS16550 compatible)
-        fdt_begin_node_num(s, "uart", DW_APB_UART0_BASE_ADDR);
-        {
-            fdt_prop_str(s, "compatible", "ns16550");
-            fdt_prop_tab_u64_2(s, "reg", DW_APB_UART0_BASE_ADDR, DW_APB_UART0_SIZE);
-            fdt_prop_u32(s, "clock-frequency", 3686400);  // Arbitrary, just to stop complaining
+        for (unsigned uart_no = 0; uart_no < 2; ++uart_no) {
+            uint64_t base_addr = uart_no == 0 ? DW_APB_UART0_BASE_ADDR : DW_APB_UART1_BASE_ADDR;
+            // Fake Synopsys™ DesignWare™ ABP™ UART (NS16550 compatible)
+            fdt_begin_node_num(s, "uart", base_addr);
+            // interrupts = <0x0a>;
+            // interrupt-parent = <0x09>;
+
+            fdt_prop_tab_u64_2(s, "reg", base_addr, DW_APB_UART0_SIZE);
+            fdt_prop_u32(s, "current-speed", 115200);
+            fdt_prop_u32(s, "clock-frequency", 25000000);
             fdt_prop_u32(s, "reg-shift", 2);
             fdt_prop_u32(s, "reg-io-width", 4);
-            // No interrupts?
+            // fdt_prop_str(s, "compatible", "snps,dw-apb-uart");
+            fdt_prop_str(s, "compatible", "ns16550a");
+            /*
+            tab[0] = plic_phandle;
+            tab[1] = DW_APB_UART0_IRQ;
+            fdt_prop_tab_u32(s, "interrupts-extended", tab, 2);
+            */
+
+            fdt_prop_u32(s, "interrupt-parent", plic_phandle);
+            fdt_prop_u32(s, "interrupts", uart_no == 0 ? DW_APB_UART0_IRQ : DW_APB_UART1_IRQ);
+            fdt_end_node(s);
         }
-        fdt_end_node(s);
 
         fb_dev = m->common.fb_dev;
         if (fb_dev) {
@@ -921,37 +946,26 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst, const char *dtb_name, 
         fdt_end_node(s); /* / */
 
         size = fdt_output(s, dst);
+        fdt_end(s);
     } else {
-        // write from other dts
-        FILE *        fPtr;
-        unsigned long fLen;
+        FILE *f = fopen(dtb_name, "rb");
+        fseek(f, 0, SEEK_END);
+        size = ftell(f);
+        rewind(f);
 
-        fPtr = fopen(dtb_name, "rb");  // Open the file in binary mode
-        fseek(fPtr, 0, SEEK_END);      // Jump to the end of the file
-        fLen = ftell(fPtr);            // Get the current byte offset in the file
-        rewind(fPtr);                  // Jump back to the beginning of the file
-
-        size_t result = fread((char *)dst, sizeof(uint8_t), fLen, fPtr);  // Read in the entire file
-        if (result != fLen) {
-            vm_error("DROMAJO failed reading the dts string\n");
+        if (fread((char *)dst, 1, size, f) != (size_t)size) {
+            vm_error("dromajo: %s: %s\n", dtb_name, strerror(errno));
             return -1;
         }
 
-        // DEBUG
-        // for (unsigned long i = 0; i < fLen; ++i)
-        //    printf("[DEBUG][%p][%ld/%ld] == 0x%x\n", &dst[i], i, fLen, dst[i]);
-        // printf("[DEBUG] Done printing\n");
-
-        fclose(fPtr);  // Close the file
-
-        size = fLen;
+        fclose(f);
     }
 
 #ifdef DUMP_DTB
     {
         FILE *f = fopen("dromajo.dtb", "wb");
-        if (f == nullptr) {
-            vm_error("DROMAJO failed to open dromajo.dtb dump file (disable DUMP_DTB?)\n");
+        if (!f) {
+            vm_error("dromajo: %s: %s\n", "dromajo.dtb", strerror(errno));
             return -1;
         }
         fwrite(dst, 1, size, f);
@@ -959,13 +973,10 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst, const char *dtb_name, 
     }
 #endif
 
-    if (!dtb_name)
-        fdt_end(s);
-
     return size;
 }
 
-static void load_elf_image(RISCVMachine *s, const uint8_t *image, size_t image_len) {
+void load_elf_image(RISCVMachine *s, const uint8_t *image, size_t image_len) {
     Elf64_Ehdr *      ehdr = (Elf64_Ehdr *)image;
     const Elf64_Phdr *ph   = (Elf64_Phdr *)(image + ehdr->e_phoff);
 
@@ -973,11 +984,45 @@ static void load_elf_image(RISCVMachine *s, const uint8_t *image, size_t image_l
         if (ph->p_type == PT_LOAD) {
             size_t rounded_size = ph->p_memsz;
             rounded_size        = (rounded_size + DEVRAM_PAGE_SIZE - 1) & ~(DEVRAM_PAGE_SIZE - 1);
-            PhysMemoryRange *pr = get_phys_mem_range(s->mem_map, ph->p_vaddr);
-            if (pr->addr != RAM_BASE_ADDR)
+            if (ph->p_vaddr == BOOT_BASE_ADDR) {
+                if (s->bootrom_loaded) {
+                    vm_error("dromajo: WARNING multiple bootrams; last wins");
+                }
+                s->bootrom_loaded = true;
+            } else if (ph->p_vaddr != s->ram_base_addr)
+                /* XXX This is a kludge to taper over the fact that cpu_register_ram will
+                   happily allocate mapping covering existing mappings.  Unfortunately we
+                   can't fix this without a substantial rewrite as the handling of IO devices
+                   depends on this. */
                 cpu_register_ram(s->mem_map, ph->p_vaddr, rounded_size, 0);
             memcpy(get_ram_ptr(s, ph->p_vaddr), image + ph->p_offset, ph->p_filesz);
         }
+}
+
+void load_hex_image(RISCVMachine *s, uint8_t *image, size_t image_len) {
+    char *p = (char *)image;
+
+    for (;;) {
+        long unsigned offset = 0;
+        unsigned data = 0;
+        if (p[0] == '0' && p[1] == 'x')
+          p += 2;
+        char *nl = strchr(p, '\n');
+        if (nl)
+            *nl = 0;
+        int n = sscanf(p, "%lx %x", &offset, &data);
+        if (n != 2)
+            break;
+        uint32_t *mem = (uint32_t *)get_ram_ptr(s, offset);
+        if (!mem)
+          errx(1, "dromajo: can't load hex file, no memory at 0x%lx", offset);
+
+        *mem = data;
+
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
 }
 
 static int load_bootrom(RISCVMachine *s, const char *bootrom_name) {
@@ -1052,10 +1097,11 @@ static int generate_bootrom(RISCVMachine *s) {
 }
 
 /* Return non-zero on failure */
-static int copy_kernel(RISCVMachine *s, const uint8_t *fw_buf, size_t fw_buf_len, const uint8_t *kernel_buf, size_t kernel_buf_len,
+static int copy_kernel(RISCVMachine *s, uint8_t *fw_buf, size_t fw_buf_len, const uint8_t *kernel_buf, size_t kernel_buf_len,
                        const uint8_t *initrd_buf, size_t initrd_buf_len, const char *bootrom_name, const char *dtb_name,
                        const char *cmd_line) {
-    uint64_t initrd_start = 0, initrd_end = 0;
+    uint64_t initrd_end = 0;
+    s->initrd_start     = 0;
 
     if (fw_buf_len > s->ram_size) {
         vm_error("Firmware too big\n");
@@ -1066,8 +1112,9 @@ static int copy_kernel(RISCVMachine *s, const uint8_t *fw_buf, size_t fw_buf_len
     if (elf64_is_riscv64(fw_buf, fw_buf_len)) {
         // XXX if the ELF is given in the config file, then we don't get to set memory base based on that.
 
+        load_elf_image(s, fw_buf, fw_buf_len);
         uint64_t fw_entrypoint = elf64_get_entrypoint(fw_buf);
-        if (fw_entrypoint != s->ram_base_addr) {
+        if (!s->bootrom_loaded && fw_entrypoint != s->ram_base_addr) {
             fprintf(dromajo_stderr,
                     "DROMAJO currently requires a 0x%" PRIx64 " starting address, image assumes 0x%0" PRIx64 "\n",
                     s->ram_base_addr,
@@ -1076,6 +1123,8 @@ static int copy_kernel(RISCVMachine *s, const uint8_t *fw_buf, size_t fw_buf_len
         }
 
         load_elf_image(s, fw_buf, fw_buf_len);
+    } else if (fw_buf_len > 2 && fw_buf[0] == '0' && fw_buf[0] == 'x') {
+        load_hex_image(s, fw_buf, fw_buf_len);
     } else
         memcpy(get_ram_ptr(s, s->ram_base_addr), fw_buf, fw_buf_len);
 
@@ -1098,27 +1147,34 @@ static int copy_kernel(RISCVMachine *s, const uint8_t *fw_buf, size_t fw_buf_len
             vm_error("Initrd too big\n");
             return 1;
         }
-        initrd_end   = s->ram_base_addr + s->ram_size;
-        initrd_start = initrd_end - initrd_buf_len;
-        initrd_start = (initrd_start >> 12) << 12;
-        memcpy(get_ram_ptr(s, initrd_start), initrd_buf, initrd_buf_len);
+        initrd_end      = s->ram_base_addr + s->ram_size;
+        s->initrd_start = initrd_end - initrd_buf_len;
+        s->initrd_start = (s->initrd_start >> 12) << 12;
+        memcpy(get_ram_ptr(s, s->initrd_start), initrd_buf, initrd_buf_len);
     }
 
-    int32_t bootromSzBytes = bootrom_name ? load_bootrom(s, bootrom_name) : generate_bootrom(s);
+    if (!s->bootrom_loaded) {
+        if (bootrom_name) {
+            if (load_bootrom(s, bootrom_name) < 0)
+                return -1;
+        } else {
+            int32_t bootromSzBytes = generate_bootrom(s);
 
-    if (bootromSzBytes < 0)
-        return -1;
+            if (bootromSzBytes < 0)
+                return -1;
 
-    // setup the dtb
-    uint32_t fdt_off = (BOOT_BASE_ADDR - ROM_BASE_ADDR);
-    if (s->compact_bootrom)
-        fdt_off += bootromSzBytes;
-    else
-        fdt_off += 256;
+            // setup the dtb
+            uint32_t fdt_off = (BOOT_BASE_ADDR - ROM_BASE_ADDR);
+            if (s->compact_bootrom)
+                fdt_off += bootromSzBytes;
+            else
+                fdt_off += 256;
 
-    uint8_t *ram_ptr = get_ram_ptr(s, ROM_BASE_ADDR);
-    if (riscv_build_fdt(s, ram_ptr + fdt_off, dtb_name, cmd_line, initrd_start, initrd_end) < 0)
-        return -1;
+            uint8_t *ram_ptr = get_ram_ptr(s, ROM_BASE_ADDR);
+            if (riscv_build_fdt(s, ram_ptr + fdt_off, dtb_name, cmd_line, s->initrd_start, initrd_end) < 0)
+                return -1;
+        }
+    }
 
     for (int i = 0; i < s->ncpus; ++i) riscv_set_debug_mode(s->cpu_state[i], TRUE);
 
@@ -1151,6 +1207,50 @@ uint8_t       dromajo_get_byte_direct(uint64_t paddr) {
     return *ptr;
 }
 
+static void dump_dram(RISCVMachine *s, FILE *f[16], const char *region, uint64_t start, uint64_t len) {
+    if (len == 0)
+        return;
+
+    assert(start % 1024 == 0);
+
+    uint64_t end = start + len;
+
+    fprintf(stderr, "Dumping %-10s [%016lx; %016lx) %6.2f MiB\n", region, start, end, len / (1024 * 1024.0));
+
+    /*
+      Bytes
+      0 ..31   memImage_dwrow0_even.hex:0-7
+      32..63   memImage_dwrow1_even.hex:0-7
+               memImage_dwrow2_even.hex:0-7
+               memImage_dwrow3_even.hex:0-7
+               memImage_derow0_even.hex:0-7
+               memImage_derow1_even.hex:0-7
+               memImage_derow2_even.hex:0-7
+               memImage_derow3_even.hex:0-7
+               memImage_dwrow0_odd.hex:0-7
+
+               memImage_dwrow0_even.hex:8-15? (Not verified, but that would be logical)
+
+      IOW,  16 banks of 64-bit wide memories, striped in cache sized (64B) blocks.  16 * 64 = 1 KiB
+
+
+      @00000000 0053c5634143b383
+    */
+
+    for (int line = (start - s->ram_base_addr) / 1024; start < end; ++line) {
+        for (int bank = 0; bank < 16; ++bank) {
+            for (int word = 0; word < 8; ++word) {
+                fprintf(f[bank],
+                        "@%08x %016lx\n",
+                        // Yes, this is mental
+                        (line % 8) * 0x01000000 + line / 8 * 8 + word,
+                        *(uint64_t *)get_ram_ptr(s, start));
+                start += sizeof(uint64_t);
+            }
+        }
+    }
+}
+
 RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     VIRTIODevice *blk_dev;
     int           irq_num, i;
@@ -1166,6 +1266,10 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     s->mem_map->flush_tlb_write_range = riscv_flush_tlb_write_range;
     s->common.maxinsns                = p->maxinsns;
     s->common.snapshot_load_name      = p->snapshot_load_name;
+
+    /* loggers are changed using install_new_loggers() in dromajo_cosim */
+    s->common.debug_log = &dromajo_default_debug_log;
+    s->common.error_log = &dromajo_default_error_log;
 
     s->ncpus = p->ncpus;
 
@@ -1202,7 +1306,6 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     }
 
     /* RAM */
-    cpu_register_ram(s->mem_map, 0, 4096, 0);  // Have memory at 0 for uaccess-etcsr to pass
     cpu_register_ram(s->mem_map, s->ram_base_addr, s->ram_size, 0);
     cpu_register_ram(s->mem_map, ROM_BASE_ADDR, (ROM_SIZE * s->ncpus), 0);
 
@@ -1210,23 +1313,32 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
         s->cpu_state[i]->physical_addr_len = p->physical_addr_len;
     }
 
-    if (p->mmio_start) {
-        uint64_t sz = p->mmio_end - p->mmio_start;
-        cpu_register_device(s->mem_map, p->mmio_start, sz, 0, mmio_read, mmio_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
-    }
+    SiFiveUARTState *uart = (SiFiveUARTState *)calloc(sizeof *uart, 1);
+    uart->irq             = UART0_IRQ;
+    uart->cs              = p->console;
+    cpu_register_device(s->mem_map, UART0_BASE_ADDR, UART0_SIZE, uart, uart_read, uart_write, DEVIO_SIZE32);
 
-    if (p->mmio_addrset_size > 0) {
-        for (size_t i = 0; i < p->mmio_addrset_size; ++i) {
-            uint64_t sz = p->mmio_addrset[i].size;
-            cpu_register_device(s->mem_map,
-                                p->mmio_addrset[i].start,
-                                sz,
-                                0,
-                                mmio_read,
-                                mmio_write,
-                                DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
-        }
-    }
+    DW_apb_uart_state *dw_apb_uart = (DW_apb_uart_state *)calloc(sizeof *dw_apb_uart, 1);
+    dw_apb_uart->irq               = &s->plic_irq[DW_APB_UART0_IRQ];
+    dw_apb_uart->cs                = p->console;
+    cpu_register_device(s->mem_map,
+                        DW_APB_UART0_BASE_ADDR,
+                        DW_APB_UART0_SIZE,
+                        dw_apb_uart,
+                        dw_apb_uart_read,
+                        dw_apb_uart_write,
+                        DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
+
+    DW_apb_uart_state *dw_apb_uart1 = (DW_apb_uart_state *)calloc(sizeof *dw_apb_uart, 1);
+    dw_apb_uart1->irq               = &s->plic_irq[DW_APB_UART1_IRQ];
+    dw_apb_uart1->cs                = p->console;
+    cpu_register_device(s->mem_map,
+                        DW_APB_UART1_BASE_ADDR,
+                        DW_APB_UART1_SIZE,
+                        dw_apb_uart1,
+                        dw_apb_uart_read,
+                        dw_apb_uart_write,
+                        DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
     cpu_register_device(s->mem_map,
                         p->clint_base_addr,
@@ -1239,19 +1351,17 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
 
     //BlackParrot Host
     host_init(s);
-    if (s->host) {
-      cpu_register_device(s->mem_map, HOST_BASE_ADDR, HOST_SIZE, s,
-                          host_read, host_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
+    cpu_register_device(s->mem_map, HOST_BASE_ADDR, HOST_SIZE, s,
+                        host_read, host_write, DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
-      // BlackParrot Parameter ROM
-      cpu_register_device(s->mem_map,
-                          PARAM_ROM_BASE_ADDR,
-                          PARAM_ROM_SIZE,
-                          s,
-                          param_rom_read,
-                          param_rom_write,
-                          DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
-    }
+    // BlackParrot Parameter ROM
+    cpu_register_device(s->mem_map,
+                        PARAM_ROM_BASE_ADDR,
+                        PARAM_ROM_SIZE,
+                        s,
+                        param_rom_read,
+                        param_rom_write,
+                        DEVIO_SIZE32 | DEVIO_SIZE16 | DEVIO_SIZE8);
 
     for (int j = 1; j < 32; j++) {
         irq_init(&s->plic_irq[j], plic_set_irq, s, j);
@@ -1267,7 +1377,7 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     irq_num       = VIRTIO_IRQ;
 
     /* virtio console */
-    if (p->console) {
+    if (p->console && 0) {
         vbus->irq             = &s->plic_irq[irq_num];
         s->common.console_dev = virtio_console_init(vbus, p->console);
         vbus->addr += VIRTIO_SIZE;
@@ -1341,12 +1451,6 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
                            p->cmdline))
         return NULL;
 
-    /* mmio setup for cosim */
-    s->mmio_start        = p->mmio_start;
-    s->mmio_end          = p->mmio_end;
-    s->mmio_addrset      = p->mmio_addrset;
-    s->mmio_addrset_size = p->mmio_addrset_size;
-
     /* interrupts and exception setup for cosim */
     s->common.cosim             = false;
     for (int i = 0; i < s->ncpus; ++i) {
@@ -1360,19 +1464,61 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     s->clint_base_addr = p->clint_base_addr;
     s->clint_size      = p->clint_size;
 
+    return s;
+}
+
+RISCVMachine *virt_machine_load(const VirtMachineParams *p, RISCVMachine *s) {
+    if (!p->files[VM_FILE_BIOS].buf) {
+        vm_error("No bios given\n");
+        return NULL;
+    } else if (copy_kernel(s,
+                           p->files[VM_FILE_BIOS].buf,
+                           p->files[VM_FILE_BIOS].len,
+                           p->files[VM_FILE_KERNEL].buf,
+                           p->files[VM_FILE_KERNEL].len,
+                           p->files[VM_FILE_INITRD].buf,
+                           p->files[VM_FILE_INITRD].len,
+                           p->bootrom_name,
+                           p->dtb_name,
+                           p->cmdline))
+        return NULL;
+
     if (p->dump_memories) {
-        FILE *fd = fopen("BootRAM.hex", "w+");
-        if (fd == 0) {
-            vm_error("ERROR: could not create BootRAM.hex\n");
+        FILE *f = fopen("BootRAM.hex", "w+");
+        if (!f) {
+            vm_error("dromajo: %s: %s\n", "BootRAM.hex", strerror(errno));
             return NULL;
         }
 
         uint8_t *ram_ptr = get_ram_ptr(s, ROM_BASE_ADDR);
         for (int i = 0; i < (ROM_SIZE * s->ncpus) / 4; ++i) {
             uint32_t *q_base = (uint32_t *)(ram_ptr + (BOOT_BASE_ADDR - ROM_BASE_ADDR));
-            fprintf(fd, "@%06x %08x\n", i, q_base[i]);
+            fprintf(f, "@%06x %08x\n", i, q_base[i]);
         }
-        fclose(fd);
+
+        fclose(f);
+
+        {
+            FILE *f[16] = {0};
+
+            char hexname[60];
+            for (int i = 0; i < 16; ++i) {
+                snprintf(hexname, sizeof hexname, "memImage_d%crow%d_%s.hex", "we"[i / 4 % 2], i % 4, i / 8 == 0 ? "even" : "odd");
+                f[i] = fopen(hexname, "w");
+                if (!f[i]) {
+                    vm_error("dromajo: %s: %s\n", hexname, strerror(errno));
+                    return NULL;
+                }
+            }
+
+            dump_dram(s, f, "firmware", s->ram_base_addr, p->files[VM_FILE_BIOS].len);
+            dump_dram(s, f, "kernel", s->ram_base_addr + KERNEL_OFFSET, p->files[VM_FILE_KERNEL].len);
+            dump_dram(s, f, "initrd", s->initrd_start, p->files[VM_FILE_INITRD].len);
+
+            for (int i = 0; i < 16; ++i) {
+                fclose(f[i]);
+            }
+        }
     }
 
     global_virt_machine = s;
@@ -1389,9 +1535,6 @@ void virt_machine_end(RISCVMachine *s) {
     for (int i = 0; i < s->ncpus; ++i) {
         riscv_cpu_end(s->cpu_state[i]);
     }
-
-    if (s->mmio_addrset_size > 0)
-        free(s->mmio_addrset);
 
     phys_mem_map_end(s->mem_map);
     free(s);

@@ -89,12 +89,14 @@
 #define MCPUID_Q     (1 << ('Q' - 'A'))
 #define MCPUID_C     (1 << ('C' - 'A'))
 #define MCPUID_X     (1 << ('X' - 'A'))
+#define MCPUID_V     (1 << ('V' - 'A'))
 
 /* mstatus CSR */
 
 #define MSTATUS_SPIE_SHIFT 5
 #define MSTATUS_MPIE_SHIFT 7
 #define MSTATUS_SPP_SHIFT  8
+#define MSTATUS_VS_SHIFT   9
 #define MSTATUS_MPP_SHIFT  11
 #define MSTATUS_FS_SHIFT   13
 #define MSTATUS_UXL_SHIFT  32
@@ -109,7 +111,7 @@
 #define MSTATUS_HPIE     (1 << 6)
 #define MSTATUS_MPIE     (1 << MSTATUS_MPIE_SHIFT)
 #define MSTATUS_SPP      (1 << MSTATUS_SPP_SHIFT)
-#define MSTATUS_HPP      (3 << 9)
+#define MSTATUS_VS       (3 << MSTATUS_VS_SHIFT)
 #define MSTATUS_MPP      (3 << MSTATUS_MPP_SHIFT)
 #define MSTATUS_FS       (3 << MSTATUS_FS_SHIFT)
 #define MSTATUS_XS       (3 << 15)
@@ -123,12 +125,23 @@
 #define MSTATUS_SXL_MASK ((uint64_t)3 << MSTATUS_SXL_SHIFT)
 
 // A few of Debug Trigger Match Control bits (there are many more)
-#define MCONTROL_M       (1 << 6)
-#define MCONTROL_S       (1 << 4)
-#define MCONTROL_U       (1 << 3)
-#define MCONTROL_EXECUTE (1 << 2)
-#define MCONTROL_STORE   (1 << 1)
-#define MCONTROL_LOAD    (1 << 0)
+#define MCONTROL_TYPE_AD_MATCH           (2ULL << 60)
+#define MCONTROL_DMODE                   (1ULL << 59)
+#define MCONTROL_MAXMASK_4               (4ULL << 53)
+#define MCONTROL_ACTION                  (0x3f << 12)
+#define MCONTROL_MATCH                   (0xf << 7)
+#define MCONTROL_M                       (1 << 6)
+#define MCONTROL_S                       (1 << 4)
+#define MCONTROL_U                       (1 << 3)
+#define MCONTROL_EXECUTE                 (1 << 2)
+#define MCONTROL_STORE                   (1 << 1)
+#define MCONTROL_LOAD                    (1 << 0)
+#define MCONTROL_ACTION_DEBUG_EXCEPTION   0
+#define MCONTROL_ACTION_DEBUG_MODE        1
+#define MCONTROL_MATCH_EQUAL              0
+#define MCONTROL_MATCH_NAPOT              1
+#define MCONTROL_MATCH_GE                 2
+#define MCONTROL_MATCH_LT                 3
 
 #define PHYSICAL_ADDR_LEN_DEFAULT 40
 

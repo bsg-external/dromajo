@@ -151,7 +151,7 @@ static inline void track_write(RISCVCPUState *s, uint64_t vaddr, uint64_t paddr,
 #ifdef LIVECACHE
     s->machine->llc->write(paddr);
 #endif
-    // printf("track.st[%llx:%llx]=%llx\n", paddr, paddr+size-1, data);
+    //printf("track.st[%llx:%llx]=%llx\n", paddr, paddr+size-1, data);
     s->last_data_paddr = paddr;
 #ifdef GOLDMEM_INORDER
     s->last_data_value = data;
@@ -163,7 +163,7 @@ static inline uint64_t track_dread(RISCVCPUState *s, uint64_t vaddr, uint64_t pa
     s->machine->llc->read(paddr);
 #endif
     s->last_data_paddr = paddr;
-    // printf("track.ld[%llx:%llx]=%llx\n", paddr, paddr+size-1, data);
+    //printf("track.ld[%llx:%llx]=%llx\n", paddr, paddr+size-1, data);
 
     return data;
 }
@@ -172,6 +172,7 @@ static inline uint64_t track_iread(RISCVCPUState *s, uint64_t vaddr, uint64_t pa
 #ifdef LIVECACHE
     s->machine->llc->read(paddr);
 #endif
+    //printf("track.ic[%llx:%llx]=%llx\n", paddr, paddr+size-1, data);
     assert(size == 16 || size == 32);
 
     return data;
@@ -214,19 +215,63 @@ bool riscv_cpu_pmp_access_ok(RISCVCPUState *s, uint64_t paddr, size_t size, pmpc
 
     return priv == PRV_M;
 }
-
-static inline PhysMemoryRange *get_phys_mem_range_pmp(RISCVCPUState *s, uint64_t paddr, size_t size, pmpcfg_t perm) {
-    if (!riscv_cpu_pmp_access_ok(s, paddr, size, perm))
+// Returns PhysMemoryRange, NULL address or otherwise, if access isn't
+// considered pmp blocked, sets fail to false - otherwise NULL address
+// is returned no matter the mapping of the requested address
+// and fail is set to true
+static inline PhysMemoryRange *get_phys_mem_range_pmp(RISCVCPUState *s, uint64_t paddr, size_t size, pmpcfg_t perm, bool *fail) {
+    *fail = false;
+    if (!riscv_cpu_pmp_access_ok(s, paddr, size, perm)) {
+        *fail = true;
         return NULL;
+    }
     else
         return get_phys_mem_range(s->mem_map, paddr);
+}
+
+static inline bool check_triggers(RISCVCPUState *s, target_ulong t_mctl, target_ulong addr) {
+    if (s->debug_mode) //Triggers do not fire while in Debug Mode.
+        return false;
+
+    /* Handled any breakpoint triggers in order (note, we
+     * precompute the mask and pattern to lower some of the
+     * cost). */
+    t_mctl |= MCONTROL_U << s->priv;
+
+    for (int i = 0; i < MAX_TRIGGERS; ++i)
+        if ((s->tdata1[i] & t_mctl) == t_mctl) {
+            target_ulong t_match = (s->tdata1[i] & MCONTROL_MATCH) >> 7;
+            // Matches when the top M bits of the value
+            // match the top M bits of tdata2. M is XLEN-1
+            // minus the index of the least-significant bit
+            // containing 0 in tdata2.
+            target_ulong napot_mask = ~(s->tdata2[i] + 1 ^ s->tdata2[i]);
+            target_ulong napot_addr = napot_mask & addr;
+            target_ulong napot_tdata2 = napot_mask & s->tdata2[i];
+            if (t_match == MCONTROL_MATCH_EQUAL && addr == s->tdata2[i]
+                || t_match == MCONTROL_MATCH_NAPOT && napot_addr == napot_tdata2
+                || t_match == MCONTROL_MATCH_GE && addr >= s->tdata2[i]
+                || t_match == MCONTROL_MATCH_LT && addr < s->tdata2[i]) {
+                if (s->tdata2[i] & MCONTROL_ACTION && s->tdata1[i] & MCONTROL_DMODE) {
+                    /* Only m control action mode debug mode is implemented */
+                    riscv_set_debug_mode(s, true);
+                    /* TO-DO: implement debug-mode */
+                    s->pc = 0x0800;
+                    return true;
+                }
+                s->pending_exception = CAUSE_BREAKPOINT;
+                s->pending_tval      = addr;
+                return true;
+            }
+        }
+    return false;
 }
 
 /* addr must be aligned. Only RAM accesses are supported */
 #define PHYS_MEM_READ_WRITE(size, uint_type)                                                         \
     void riscv_phys_write_u##size(RISCVCPUState *s, target_ulong paddr, uint_type val, bool *fail) { \
-        PhysMemoryRange *pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_W);                  \
-        if (!pr || !pr->is_ram) {                                                                    \
+        PhysMemoryRange *pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_W, fail);           \
+        if (!pr || *fail || !pr->is_ram) {                                                     \
             *fail = true;                                                                            \
             return;                                                                                  \
         }                                                                                            \
@@ -236,8 +281,8 @@ static inline PhysMemoryRange *get_phys_mem_range_pmp(RISCVCPUState *s, uint64_t
     }                                                                                                \
                                                                                                      \
     uint_type riscv_phys_read_u##size(RISCVCPUState *s, target_ulong paddr, bool *fail) {            \
-        PhysMemoryRange *pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_R);                  \
-        if (!pr) {                                                                                   \
+        PhysMemoryRange *pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_R, fail);           \
+        if (!pr || *fail) {                                                                    \
             *fail = true;                                                                            \
             return 0;                                                                                \
         }                                                                                            \
@@ -254,6 +299,8 @@ PHYS_MEM_READ_WRITE(64, uint64_t)
 /* return 0 if OK, != 0 if exception */
 #define TARGET_READ_WRITE(size, uint_type, size_log2)                                                                       \
     static inline __must_use_result int target_read_u##size(RISCVCPUState *s, uint_type *pval, target_ulong addr) {         \
+        if (check_triggers(s, MCONTROL_LOAD, addr))                                                                         \
+            return -1;                                                                                                      \
         uint32_t tlb_idx;                                                                                                   \
         if (!CONFIG_ALLOW_MISALIGNED_ACCESS && (addr & (size / 8 - 1)) != 0) {                                              \
             s->pending_tval      = addr;                                                                                    \
@@ -277,17 +324,24 @@ PHYS_MEM_READ_WRITE(64, uint64_t)
     }                                                                                                                       \
                                                                                                                             \
     static inline __must_use_result int target_write_u##size(RISCVCPUState *s, target_ulong addr, uint_type val) {          \
-        uint32_t tlb_idx;                                                                                                   \
-        if (!CONFIG_ALLOW_MISALIGNED_ACCESS && (addr & (size / 8 - 1)) != 0) {                                              \
+                                                                                                                            \
+        if (check_triggers(s, MCONTROL_STORE, addr))                                                                        \
+            return -1;                                                                                                      \
+                                                                                                                            \
+        if (unlikely(!CONFIG_ALLOW_MISALIGNED_ACCESS && (addr & (size / 8 - 1)) != 0)) {                                    \
             s->pending_tval      = addr;                                                                                    \
             s->pending_exception = CAUSE_MISALIGNED_STORE;                                                                  \
             return -1;                                                                                                      \
         }                                                                                                                   \
-        tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);                                                                      \
+                                                                                                                            \
+        uint32_t tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);                                                             \
         if (likely(s->tlb_write[tlb_idx].vaddr == (addr & ~(PG_MASK & ~((size / 8) - 1))))) {                               \
             *(uint_type *)(s->tlb_write[tlb_idx].mem_addend + (uintptr_t)addr) = val;                                       \
-            uint64_t paddr                                                     = s->tlb_write_paddr_addend[tlb_idx] + addr; \
-            track_write(s, addr, paddr, val, size);                                                                         \
+                                                                                                                            \
+            ++s->machine->memseqno;                                                                                         \
+            ++s->load_res_memseqno;                                                                                         \
+                                                                                                                            \
+            track_write(s, addr, s->tlb_write_paddr_addend[tlb_idx] + addr, val, size);                                     \
             return 0;                                                                                                       \
         }                                                                                                                   \
                                                                                                                             \
@@ -436,6 +490,7 @@ no_inline int riscv_cpu_read_memory(RISCVCPUState *s, mem_uint_t *pval, target_u
     uint8_t *        ptr;
     PhysMemoryRange *pr;
     mem_uint_t       ret;
+    bool             pmp_blocked = false;
 
     /* first handle unaligned accesses */
     size = 1 << size_log2;
@@ -506,8 +561,8 @@ no_inline int riscv_cpu_read_memory(RISCVCPUState *s, mem_uint_t *pval, target_u
             s->pending_exception = err == -1 ? CAUSE_LOAD_PAGE_FAULT : CAUSE_FAULT_LOAD;
             return -1;
         }
-        pr = get_phys_mem_range_pmp(s, paddr, size, PMPCFG_R);
-        if (!pr) {
+        pr = get_phys_mem_range_pmp(s, paddr, size, PMPCFG_R, &pmp_blocked);
+        if (pmp_blocked) {
 #ifdef DUMP_INVALID_MEM_ACCESS
             fprintf(dromajo_stderr, "riscv_cpu_read_memory: invalid physical address 0x");
             print_target_ulong(paddr);
@@ -515,10 +570,21 @@ no_inline int riscv_cpu_read_memory(RISCVCPUState *s, mem_uint_t *pval, target_u
 #endif
             s->pending_tval      = addr;
             s->pending_exception = CAUSE_FAULT_LOAD;
-            return -1;
+            return -1; // Invalid pmp access
         }
 
-        if (pr->is_ram) {
+        if (!pr) {
+            // Isn't RAM or Virt Device, treated as mmio
+#if 0
+            static uint64_t suppress = 1;
+            if (paddr != suppress) {
+                fprintf(dromajo_stderr, "Dromajo: dropping %d-bit load from 0x%lx\n",
+                        1 << (3 + size_log2), paddr);
+                suppress = paddr;
+            }
+#endif
+            ret = 0;
+        } else if (pr->is_ram) {
             tlb_idx                    = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
             ptr                        = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
             s->tlb_read[tlb_idx].vaddr = addr & ~PG_MASK;
@@ -572,6 +638,7 @@ no_inline int riscv_cpu_write_memory(RISCVCPUState *s, target_ulong addr, mem_ui
     target_ulong     paddr, offset;
     uint8_t *        ptr;
     PhysMemoryRange *pr;
+    bool             pmp_blocked = false;
 
     /* first handle unaligned accesses */
     size = 1 << size_log2;
@@ -594,16 +661,22 @@ no_inline int riscv_cpu_write_memory(RISCVCPUState *s, target_ulong addr, mem_ui
             s->pending_exception = err == -1 ? CAUSE_STORE_PAGE_FAULT : CAUSE_FAULT_STORE;
             return -1;
         }
-        pr = get_phys_mem_range_pmp(s, paddr, size, PMPCFG_W);
-        if (!pr) {
-#ifdef DUMP_INVALID_MEM_ACCESS
-            fprintf(dromajo_stderr, "riscv_cpu_write_memory: invalid physical address 0x");
-            print_target_ulong(paddr);
-            fprintf(dromajo_stderr, "\n");
-#endif
+        pr = get_phys_mem_range_pmp(s, paddr, size, PMPCFG_W, &pmp_blocked);
+        if(pmp_blocked) {
             s->pending_tval      = addr;
             s->pending_exception = CAUSE_FAULT_STORE;
             return -1;
+        }
+        else if (!pr) {
+            // Isn't RAM or Virt Device, treated as mmio and reads copy DUT data
+#if 0
+            static uint64_t suppress = 1;
+            if (paddr != suppress) {
+                fprintf(dromajo_stderr, "Dromajo: dropping %d-bit store to 0x%lx\n",
+                        1 << (3 + size_log2), paddr);
+                suppress = paddr;
+            }
+#endif
         } else if (pr->is_ram) {
             phys_mem_set_dirty_bit(pr, paddr - pr->addr);
             tlb_idx                     = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
@@ -627,6 +700,8 @@ no_inline int riscv_cpu_write_memory(RISCVCPUState *s, target_ulong addr, mem_ui
 #endif
                 default: abort();
             }
+            ++s->machine->memseqno;
+            ++s->load_res_memseqno;
         } else {
             offset = paddr - pr->addr;
             if (((pr->devio_flags >> size_log2) & 1) != 0) {
@@ -665,6 +740,7 @@ static no_inline __must_use_result int target_read_insn_slow(RISCVCPUState *s, u
     target_ulong     paddr;
     uint8_t *        ptr;
     PhysMemoryRange *pr;
+    bool             pmp_blocked = false;
 
     int err = riscv_cpu_get_phys_addr(s, addr, ACCESS_CODE, &paddr);
     if (err) {
@@ -672,8 +748,8 @@ static no_inline __must_use_result int target_read_insn_slow(RISCVCPUState *s, u
         s->pending_exception = err == -1 ? CAUSE_FETCH_PAGE_FAULT : CAUSE_FAULT_FETCH;
         return -1;
     }
-    pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_X);
-    if (!pr || !pr->is_ram) {
+    pr = get_phys_mem_range_pmp(s, paddr, size / 8, PMPCFG_X, &pmp_blocked);
+    if (!pr || pmp_blocked || !pr->is_ram) {
         /* We only allow execution from RAM */
         s->pending_tval      = addr;
         s->pending_exception = CAUSE_FAULT_FETCH;
@@ -700,8 +776,8 @@ static no_inline __must_use_result int target_read_insn_slow(RISCVCPUState *s, u
             return -1;
         }
 
-        PhysMemoryRange *pr_cross = get_phys_mem_range_pmp(s, paddr_cross, 2, PMPCFG_X);
-        if (!pr_cross || !pr_cross->is_ram) {
+        PhysMemoryRange *pr_cross = get_phys_mem_range_pmp(s, paddr_cross, 2, PMPCFG_X, &pmp_blocked);
+        if (!pr_cross || pmp_blocked || !pr_cross->is_ram) {
             /* We only allow execution from RAM */
             s->pending_tval      = addr;
             s->pending_exception = CAUSE_FAULT_FETCH;
@@ -778,19 +854,337 @@ void riscv_cpu_flush_tlb_write_range_ram(RISCVCPUState *s, uint8_t *ram_ptr, siz
         }
 }
 
-#define SSTATUS_MASK (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_UXL_MASK)
+#if VLEN > 0
+#ifdef MASK_AGNOSTIC_FILL
+static inline void mask_agnostic_fill(RISCVCPUState *s, target_ulong elm_size, uint8_t* elm_ptr) {
+    if ((s->vtype >> 7 & 1) == 0)
+        return
+
+    int fill_val = -1;
+    if (elm_size == 8)
+        *elm_ptr = fill_val;
+    else if (elm_size == 16) {
+        uint16_t *elm_ptr_e16 = (uint16_t *)elm_ptr;
+        *elm_ptr_e16 = fill_val;
+    } else if (elm_size == 32) {
+        uint32_t *elm_ptr_e32 = (uint32_t *)elm_ptr;
+        *elm_ptr_e32 = fill_val;
+    } else {
+        uint64_t *elm_ptr_e64 = (uint64_t *)elm_ptr;
+        *elm_ptr_e64 = fill_val;
+    }
+}
+#endif
+static inline void clear_most_recently_written_vregs(RISCVCPUState *s) {
+    for (int i = 0; i < 32; i++) s->most_recently_written_vregs[i] = false;
+}
+
+static inline target_ulong get_lmul(RISCVCPUState *s) {
+    target_ulong lmul = s->vtype & LMUL_MASK;
+    if (lmul & LMUL_BOUNDARY)
+        return 1 << lmul - LMUL_BOUNDARY - 1;
+    return 1 << lmul + 3;
+}
+
+static inline target_ulong get_sew(RISCVCPUState *s) {
+    target_ulong vsew = s->vtype >> SEW_SHIFT & SEW_MASK;
+    return 1 << vsew + 3;
+}
+
+static inline target_ulong get_vlmax(RISCVCPUState *s) {
+    target_ulong vlmul = s->vtype & LMUL_MASK;
+    if (vlmul & LMUL_BOUNDARY) {
+        vlmul -= LMUL_BOUNDARY;
+        return VLEN / get_sew(s) / (16 >> vlmul);
+    }
+    return (1 << vlmul) * VLEN / get_sew(s);
+}
+
+// returns true if i bit of v0 mask reg is high
+static inline bool v0_mask(RISCVCPUState *s) {
+    uint16_t vstart = s->vstart;
+    uint8_t  val    = s->v_reg[0][vstart / 8] >> vstart % 8;
+    return val & 1;
+}
+
+V_REG_ACCESS_CONFIG(v_reg_read, V_REG_READ)
+V_MEM_OP_CONFIG(v_load, V_LOAD)
+V_MEM_OP_CONFIG(v_store, V_STORE)
+// XXX - most of this function belongs in the dromajo template
+/* Vector memory operation, makes distinction between load/store
+ * returns 0 if no exceptions
+ * returns 1 if illegal insn
+ * returns 2 if other exception
+ */
+static inline int vmem_op(RISCVCPUState *s, int insn, bool ld, Vector_Memory_Op (*vmem_op_config)(uint8_t)) {
+    int eew;
+    int vlmax = get_vlmax(s);
+    int width = insn >> 12 & 0x7;
+
+    switch (width) {
+        case 7: eew = 64; break;
+        case 6: eew = 32; break;
+        case 5: eew = 16; break;
+        case 0: eew = 8; break;
+        default: return 1;
+    }
+
+    int byte_advance       = eew / 8;
+    int vec_size           = VLEN / eew, index_vec_size = 0;
+    Vector_Reg_Access read_vreg = NULL;
+    int               i, j, k;
+    int               mem_advance = 0, vs2_emul, index_vstart = 0;
+    bool              fault_first = false, vector_indexed = false;
+    int               emul = 8 * vlmax * eew / VLEN;  // scaled up by 8 to avoid using floats
+    int               rd   = insn >> 7 & 0x1F;
+    int               rs1  = insn >> 15 & 0x1F;
+    int               rs2  = insn >> 20 & 0x1F;
+    bool              vm   = insn >> 25 & 1;
+    int               mop  = insn >> 26 & 0x3;
+    int               nf   = (insn >> 29 & 0x7) + 1;
+    int               vl   = s->vl;
+    // int vstart = s->vstart;
+    if (mop != 0 || rs2 != 8)  // whole reg ld/st ignore VILL
+        if (s->vtype == VILL)
+            return 1;
+
+    switch (mop) {
+        case 0:  // unit-stride
+            mem_advance = eew / 8;
+            switch (rs2) {
+                case 0: /* unit stride - vle{}/vse{} */ break;
+                case 8:                         /* whole register - vl{}re{}/vs{}re{} */
+                    if (!ld && width || !vm ||  // stores are done byte by byte, no masking allowed
+                        !IS_PO2(nf))
+                        return 1;
+                    emul = nf * 8;  // nf field encodes emul directly, ignores vlmax
+                    nf   = 1;       // useful when vector configuration unknown
+                    break;
+                case 11:             /* mask - vlm/vsm */
+                    emul = eew = 8;  // evl = ceil(vl/8)
+                    vl         = vl < 8 ? 1 : vl / 8;
+                    break;
+                case 16: /* fault-only-first - vle{}ff/vse{}ff */
+                    /* XXX - "When the fault-only-first instruction takes a trap due to an interrupt,
+                     * implementations should not reduce vl and should instead set a vstart value" */
+                    if (!ld)
+                        return 1;
+                    fault_first = true;
+                    break;
+                default: return 1;
+            }
+            break;
+        case 2: /* constant stride - vlse{}/vsse{} */
+            /* "When rs2=x0, then an implementation is allowed, but not required, to perform fewer memory
+             * operations than the number of active elements, and may perform different numbers of memory
+             * operations across different dynamic executions of the same static instruction." */
+            mem_advance = read_reg(rs2);
+            break;
+        case 1: /* vector-indexed unordered - vluxei{}/vsuxei{} */
+            /* for the sake of simulation, unordered memory accesses are implemented the same as ordered */
+        case 3: /* vector-indexed ordered - vloxei{}/vsoxei{} */
+            vs2_emul = emul;
+            if ((vs2_emul == 0 || vs2_emul > 64) || (vs2_emul * nf > 64) || (rs2 + (nf * vs2_emul / 8) > 32 || rs2 + nf > 32)
+                || (vs2_emul >= 8 && ((rs2 * 8) % vs2_emul)))
+                return 1;
+
+            vs2_emul = vs2_emul < 8 ? 1 : vs2_emul / 8;
+            emul     = get_lmul(s) < 8 ? 1 : get_lmul(s) / 8;
+            if (ld && (nf > 1) && ((rs2 <= rd && rd <= rs2 + (nf - 1) * vs2_emul) ||
+                (rs2 <= rd + (nf - 1) * emul && rd + (nf - 1) * emul <= rs2 + (nf - 1) * vs2_emul)))
+                return 1;                              // vec seg loads, destination and source v_reg groups cannot overlap
+            emul     = get_lmul(s);
+
+            vector_indexed = true;
+            read_vreg      = v_reg_read_config(eew);
+            index_vstart   = rs2 * VLEN / eew + s->vstart;
+            byte_advance   = get_sew(s) / 8;
+            vec_size       = VLEN / get_sew(s);
+            index_vec_size = VLEN / eew;
+            break;
+    }
+    if ((emul == 0 || emul > 64) ||                     // out of range EMUL [1/8 : 8] is reserved
+        (emul * nf > 64) ||                             // can't access more than 1/4th of vreg file at once
+        (rd + (nf * emul / 8) > 32 || rd + nf > 32) ||  // v_regs accessed cant go past v31
+        (emul >= 8 && ((rd * 8) % emul)))               // must have legal register specifier for selected EMUL
+        return 1;
+
+    /* given elm width configures the element and data size of memory access */
+    Vector_Memory_Op v_op;
+    if (vector_indexed)  // data size = sew, mem offset size = eew
+        v_op = (*vmem_op_config)(get_sew(s));
+    else
+        v_op = (*vmem_op_config)(eew);
+
+    if (fault_first) { /* First try dummy load to elm 0 addr to cause exception */
+        uint8_t dummy, *dummy_ptr = &dummy;
+        if (s->vstart == 0 && (*v_op)(s, read_reg(rs1), dummy_ptr))
+            return 2;
+    }
+
+    int scaled_emul = emul < 8 ? 1 : emul / 8;
+    if (ld)  // Register vregs prepared for insn
+        for (i = 0; i < scaled_emul; i++)
+            for (j = 1; j <= nf; j++) s->most_recently_written_vregs[rd + i + scaled_emul * (j - 1)] = true;
+
+    if (vec_size > vl)
+        vec_size = vl;
+    for (i = 0; i < scaled_emul; i++) {
+        int elm_start = s->vstart - vec_size * i;  // starting element of current v_reg
+
+        if (elm_start < vec_size) {                // segments expected to load for this vreg field
+            target_ulong addr = read_reg(rs1);
+            if (!vector_indexed)
+                addr += (elm_start * mem_advance) + (nf * i * VLEN / 8);
+            elm_start *= byte_advance;             // scale to size
+            int vec_size_scaled = vec_size * byte_advance;
+
+            for (j = elm_start; j < vec_size_scaled; j += byte_advance) {
+                for (k = 0; k <= nf - 1; k++) {    // store each member of segment
+                    if (vector_indexed) {
+                        int index_vec = index_vstart / index_vec_size;
+                        int index_elm = index_vstart % index_vec_size;
+                        if (vm || v0_mask(s)) {
+                            if ((*v_op)(s, addr + read_vreg(s, index_vec, index_elm) + (k * byte_advance),
+                                &s->v_reg[rd + i + k * scaled_emul][j]))
+                                    return 2;
+                        }
+#ifdef MASK_AGNOSTIC_FILL
+                        else if (ld)
+                            mask_agnostic_fill(s, get_sew(s), &s->v_reg[rd + i + k * scaled_emul][j]);
+#endif
+                    } else {
+                        if (vm || v0_mask(s)) {
+                            if ((*v_op)(s, addr, &s->v_reg[rd + i + (k * (nf - 1))][j]))
+                                if (!fault_first)      // fault can happen at any point
+                                    return 2;          // memory access caused exception
+                                else {                 // fault-only-first
+                                    s->vl                = s->vstart;
+                                    s->pending_tval      = 0;
+                                    s->pending_exception = -1;
+                                    s->vstart            = 0;
+                                    return 0;
+                                }
+                        }
+#ifdef MASK_AGNOSTIC_FILL
+                        else if (ld)
+                            mask_agnostic_fill(s, eew, &s->v_reg[rd + i + (k * (nf - 1))][j]);
+#endif
+                        addr += mem_advance;
+                    }
+                }
+                s->vstart++;
+                index_vstart++;
+            }
+        }
+    }
+    s->vstart = 0;
+    return 0;
+}
+
+bool vectorize_arithmetic(RISCVCPUState *s, uint8_t vs2, uint8_t vd, target_ulong vs1, uint8_t width_config, bool vv, bool vm,
+                          Vector_Integer_Op (*v_op_config)(uint8_t)) {
+    if (s->vtype == VILL)
+        return true;
+
+    /* v op config returns the instruction with the proper element size to be looped */
+    int               sew  = get_sew(s);
+    Vector_Integer_Op v_op = (*v_op_config)(sew);
+    if (!v_op)  // illegal sew width
+        return true;
+
+    int lmul_scaled = get_lmul(s) / 8;
+    if (lmul_scaled == 0)
+        lmul_scaled = 1;
+    else {  // vregs accessed must be aligned with lmul/emul size
+        if (vv && vs1 % lmul_scaled)
+            return true;
+        switch (width_config) {  // only vd and vs2 can be widened
+            case SINGLE_WIDTH:
+                if (vd % lmul_scaled || vs2 % lmul_scaled)
+                    return true;
+                break;
+            case WIDEN_VS2:     // narrow insn - SEW = 2*SEW op SEW
+            case WIDEN_VD_VS2:  // widen insn  - 2*SEW = 2*SEW op SEW
+                if (vs2 % (lmul_scaled * 2))
+                    return true;
+                if (width_config == WIDEN_VS2)
+                    break;
+            case WIDEN_VD:  // widen insn  - 2*SEW = SEW op SEW
+                if (vd % (lmul_scaled * 2))
+                    return true;
+                lmul_scaled <<= 1;
+                sew <<= 1;  // lmul and sew are relative to vd
+                break;
+        }
+    }
+    uint8_t *vs2_ptr;
+    void *   vs1_ptr      = &vs1;  // precalculate vs1 value if not vv operation
+    int      byte_advance = sew / 8;
+    int      vec_size     = VLEN / sew;
+    int      vs2_mod, vs1_mod, vs2_elm_mod, vs1_elm_mod;  // narrowing/widening modifiers set vs2/vs1 relative to vd
+    vs2_mod = vs1_mod = vs2_elm_mod = vs1_elm_mod = 0;
+    for (int i = 0; i < lmul_scaled; i++) {        // lmul/sew are relative to vd
+        int elm_start = s->vstart - vec_size * i;  // starting element of current vd
+
+        if (elm_start < vec_size) {                         // operations expected to happen for this vreg
+            s->most_recently_written_vregs[vd + i] = true;  // register vd(s) prepared for insn
+            elm_start *= byte_advance;                      // scale to size
+            int vec_size_scaled = VLEN / 8;
+
+            for (int j = elm_start; j < vec_size_scaled; j += byte_advance) {
+                if (width_config)
+                    switch (width_config) {
+                        case WIDEN_VD_VS2:  // needs to modify vs1
+                        case WIDEN_VD:      // needs to modify vs1 vs2
+                            vs1_mod = -(i / 2 + i % 2);
+                            if (i % 2)
+                                vs1_elm_mod = (vec_size_scaled >> 1) - (j >> 1);
+                            else
+                                vs1_elm_mod = -j / 2;
+                            if (width_config == WIDEN_VD_VS2)
+                                break;
+                            vs2_mod     = vs1_mod;
+                            vs2_elm_mod = vs1_elm_mod;
+                            break;
+                        case WIDEN_VS2:  // needs to modify vs2
+                            vs2_mod     = 2 * j / vec_size_scaled;
+                            vs2_elm_mod = j;
+                            break;
+                    }
+
+                if (vv)  // vector-vector operation
+                    vs1_ptr = &s->v_reg[vs1 + i + vs1_mod][j + vs1_elm_mod];
+                vs2_ptr = &s->v_reg[vs2 + i + vs2_mod][j + vs2_elm_mod];
+
+                if (vm || v0_mask(s))
+                    (*v_op)(s, &s->v_reg[vd + i][j], vs2_ptr, vs1_ptr);
+#ifdef MASK_AGNOSTIC_FILL
+                else
+                    mask_agnostic_fill(s, sew, &s->v_reg[vd + i][j]);
+#endif
+                s->vstart++;
+            }
+        }
+    }
+    s->vstart = 0;
+    return false;
+}
+#endif
+
+#define SSTATUS_MASK (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_VS | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_UXL_MASK)
 
 #define MSTATUS_MASK                                                                                                               \
-    (MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP | MSTATUS_MPP | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM \
+    (MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP | MSTATUS_MPP | MSTATUS_VS | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM \
      | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK)
 
 /* return the complete mstatus with the SD bit */
 static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask) {
     target_ulong val;
     BOOL         sd;
-    val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT);
+    val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT) | (s->vs << MSTATUS_VS_SHIFT);
     val &= mask;
-    sd = ((val & MSTATUS_FS) == MSTATUS_FS) | ((val & MSTATUS_XS) == MSTATUS_XS);
+    sd = ((val & MSTATUS_VS) == MSTATUS_VS) | ((val & MSTATUS_FS) == MSTATUS_FS) | ((val & MSTATUS_XS) == MSTATUS_XS);
     if (sd)
         val |= (target_ulong)1 << 63;
     return val;
@@ -803,8 +1197,9 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val) {
         tlb_flush_all(s);
     }
     s->fs = (val >> MSTATUS_FS_SHIFT) & 3;
+    s->vs = (val >> MSTATUS_VS_SHIFT) & 3;
 
-    target_ulong mask = MSTATUS_MASK & ~(MSTATUS_FS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
+    target_ulong mask = MSTATUS_MASK & ~(MSTATUS_FS | MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
     s->mstatus        = s->mstatus & ~mask | val & mask;
 }
 
@@ -823,13 +1218,17 @@ static BOOL counter_access_ok(RISCVCPUState *s, uint32_t csr) {
 
 /* return -1 if invalid CSR. 0 if OK. 'will_write' indicate that the
    csr will be written after (used for CSR access check) */
-static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr, BOOL will_write) {
+static int csr_read(RISCVCPUState *s, uint32_t funct3, target_ulong *pval, uint32_t csr, BOOL will_write) {
     target_ulong val;
 
     if (((csr & 0xc00) == 0xc00) && will_write)
         return -1; /* read-only CSR */
     if (s->priv < ((csr >> 8) & 3))
         return -1; /* not enough priviledge */
+
+    if (s->machine->hooks.csr_read)
+        if (!s->machine->hooks.csr_read(s, funct3, csr, pval))
+            return 0;
 
     switch (csr) {
 #if FLEN > 0
@@ -847,6 +1246,28 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr, BOOL wil
             if (s->fs == 0)
                 return -1;
             val = s->fflags | (s->frm << 5);
+            break;
+#endif
+#if VLEN > 0
+        case 0x008: /* vstart */
+           if (s->vs == 0)
+               return -1;
+           val = s->vstart;
+            break;
+        case 0x009: /* vxsat */
+            if (s->vs == 0)
+                return -1;
+            val = s->vxsat;
+           break;
+        case 0x00A: /* vxrm */
+            if (s->vs == 0)
+                return -1;
+           val = s->vxrm;
+            break;
+        case 0x00F: /* vcsr */
+            if (s->vs == 0)
+                return -1;
+           val = s->vxsat | s->vxrm << 1;
             break;
 #endif
         case 0x100: val = get_mstatus(s, SSTATUS_MASK); break;
@@ -890,10 +1311,6 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr, BOOL wil
 
         case 0x7a2:  // tdata2
             val = s->tdata2[s->tselect];
-            break;
-
-        case 0x7a3:  // tdata3
-            val = s->tdata3[s->tselect];
             break;
 
         case 0x7b0:
@@ -990,7 +1407,23 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr, BOOL wil
                 goto invalid_csr;
             val = 0;  // mhpmcounter3..31
             break;
-
+#if VLEN > 0
+        case 0xc20: /* vl */
+            if (s->vs == 0)
+                return -1;
+            val = s->vl;
+            break;
+        case 0xc21: /* vtype */
+            if (s->vs == 0)
+               return -1;
+            val = s->vtype;
+            break;
+        case 0xc22: /* vlenb */
+            if (s->vs == 0)
+                return -1;
+            val = VLEN / 8; /* The value in vlenb is a design-time constant in any implementation */
+            break;
+#endif
         case 0xf14: val = s->mhartid; break;
         case 0xf13: val = s->mimpid; break;
         case 0xf12: val = s->marchid; break;
@@ -1043,15 +1476,15 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr, BOOL wil
         case CSR_PMPADDR(12):
         case CSR_PMPADDR(13):
         case CSR_PMPADDR(14):
-        case CSR_PMPADDR(15): goto invalid_csr; val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)]; break;
+        case CSR_PMPADDR(15): goto invalid_csr;
+        //case CSR_PMPADDR(15): val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)]; break;
+                              
 #ifdef SIMPOINT_BB
         case 0x8C2: val = 0; break;
 #endif
 
         default:
         invalid_csr:
-            if (s->machine->hooks.csr_read)
-                return s->machine->hooks.csr_read(s, csr, pval);
 
 #ifdef DUMP_INVALID_CSR
             /* the 'time' counter is usually emulated */
@@ -1116,7 +1549,7 @@ static void unpack_pmpaddrs(RISCVCPUState *s) {
                 int j;
                 // Count trailing ones
                 for (j = 0; j < 64; ++j)
-                    if ((s->csr_pmpaddr[i] & (1 << j)) == 0)
+                    if ((s->csr_pmpaddr[i] & (1llu << j)) == 0)
                         break;
                 j += 3;  // 8-byte is the lowest option
                 // NB, meaningless when i >= 56!
@@ -1141,7 +1574,7 @@ static void unpack_pmpaddrs(RISCVCPUState *s) {
 
 /* return -1 if invalid CSR, 0 if OK, -2 if CSR raised an exception,
  * 2 if TLBs have been flushed. */
-static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
+static int csr_write(RISCVCPUState *s, uint32_t funct3, uint32_t csr, target_ulong val) {
     target_ulong mask;
 
 #if defined(DUMP_CSR)
@@ -1149,6 +1582,11 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
     print_target_ulong(val);
     fprintf(dromajo_stderr, "\n");
 #endif
+
+    if (s->machine->hooks.csr_write)
+        if (!s->machine->hooks.csr_write(s, funct3, csr, val))
+            return 0;
+
     switch (csr) {
 #if FLEN > 0
         case 0x001: /* fflags */
@@ -1163,6 +1601,34 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
             set_frm(s, (val >> 5) & 7);
             s->fflags = val & 0x1f;
             s->fs     = 3;
+            break;
+#endif
+#if VLEN > 0
+        case 0x008: /* vstart */
+            if (s->vs == 0)
+                return -1;
+            s->vstart = val & VSTART_MASK;
+            s->vs     = 3;
+            break;
+        case 0x009: /* vxsat */
+            if (s->vs == 0)
+                return -1;
+            s->vxsat = val & VXSAT_MASK;
+            s->vs    = 3;
+            break;
+        case 0x00A: /* vxrm */
+            if (s->vs == 0)
+                return -1;
+            s->vxrm = val & VXRM_MASK;
+            s->vs   = 3;
+            break;
+        case 0x00F: /* vcsr */
+            if (s->vs == 0)
+                return -1;
+            val     &= VCSR_MASK;
+            s->vxsat = val & VCSR_VXSAT; /* vcsr[0] = vxsat */
+            s->vxrm  = (val & VCSR_VXRM) >> 1; /* vcsr[2:1] = vxrm */
+            s->vs    = 3;
             break;
 #endif
         case 0x100: /* sstatus */ set_mstatus(s, s->mstatus & ~SSTATUS_MASK | val & SSTATUS_MASK); break;
@@ -1242,24 +1708,27 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
             s->tselect = val % MAX_TRIGGERS;
             break;
 
-        case 0x7a1:  // tdata1
+        case 0x7a1: { // tdata1
             // Only support No Trigger and MControl
-            {
-                int type = val >> 60;
-                if (type != 0 && type != 2)
-                    break;
-                // SW can write type and mcontrol bits M and EXECUTE
-                mask                  = ((target_ulong)15 << 60) | MCONTROL_M | MCONTROL_EXECUTE;
+            // SW can write type and mcontrol bits M and EXECUTE
+            // mask 0010 0 000100 0....0 0011 1011 111 ==
+            //      m | s | u | execute | store | load
+            // type = 4d'2 maskmax = 4 (= 16 B?)
+            if (!(s->tdata1[s->tselect] & MCONTROL_DMODE) || s->debug_mode) {
+                /* When D-mode bit set, cannot write outside of debug */
+                mask = 0x20800000000011dfULL;
+                val |= 0x2080000000000000ULL;
+                /* D-mode bit can only be set in debug  */
+                if (s->debug_mode)
+                    mask += 0x800000000000000ULL;
                 s->tdata1[s->tselect] = s->tdata1[s->tselect] & ~mask | val & mask;
             }
             break;
+        }
 
         case 0x7a2:  // tdata2
-            s->tdata2[s->tselect] = val;
-            break;
-
-        case 0x7a3:  // tdata3
-            s->tdata3[s->tselect] = val;
+            if (!(s->tdata1[s->tselect] & MCONTROL_DMODE) || s->debug_mode)
+                s->tdata2[s->tselect] = val;
             break;
 
         case 0x7b0:
@@ -1357,14 +1826,26 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
         case CSR_PMPADDR(14):
         case CSR_PMPADDR(15):
             goto invalid_csr;
-            if (PMP_N <= csr - CSR_PMPADDR(0))
-                break;
-
-            // Note, due to TOR ranges, one PMPADDR can affect two entries
-            // but we just recalculate all of them
-            s->csr_pmpaddr[csr - CSR_PMPADDR(0)] = val & PMPADDR_MASK;
-            unpack_pmpaddrs(s);
-            break;
+//        case CSR_PMPADDR(15): {
+//            if (PMP_N <= csr - CSR_PMPADDR(0))
+//                break;
+//            uint64_t cfg = s->csr_pmpcfg[(csr - CSR_PMPADDR(0))/8];
+//            cfg = cfg >> (csr - CSR_PMPADDR(0)) * 8;
+//
+//            if (cfg & PMPCFG_L) // pmpcfg entry is locked
+//                break;
+//
+//            // Check if next pmpcfg(i+1) is set to TOR, writes to pmpaddr(i) are ignored
+//            cfg = (cfg >> 8);
+//            if(((cfg & PMPCFG_A_MASK) == PMPCFG_A_TOR) && (cfg & PMPCFG_L))
+//                break;
+//
+//            // Note, due to TOR ranges, one PMPADDR can affect two entries
+//            // but we just recalculate all of them
+//            s->csr_pmpaddr[csr - CSR_PMPADDR(0)] = val & PMPADDR_MASK;
+//            unpack_pmpaddrs(s);
+//            break;
+//        }
 
         case 0xb00: /* mcycle */ s->mcycle = val; break;
         case 0xb02: /* minstret */ s->minstret = val; break;
@@ -1425,8 +1906,6 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val) {
 #endif
 
         default:
-            if (s->machine->hooks.csr_write)
-                return s->machine->hooks.csr_write(s, csr, val);
 
         invalid_csr:
 #ifdef DUMP_INVALID_CSR
@@ -1458,9 +1937,9 @@ static void raise_exception2(RISCVCPUState *s, uint64_t cause, target_ulong tval
         "misaligned_store",
         "fault_store",
         "user_ecall",
-        "<reserved (supervisor_ecall?)>",
-        "<reserved (hypervisor_ecall?)>",
-        "<reserved (machine_ecall?)>",
+        "supervisor_ecall",
+        "hypervisor_ecall",
+        "machine_ecall",
         "fetch_page_fault",
         "load_page_fault",
         "<reserved_14>",
@@ -1480,7 +1959,7 @@ static void raise_exception2(RISCVCPUState *s, uint64_t cause, target_ulong tval
                 s->priv,
                 cause_s[cause],
                 (uintmax_t)s->pc);
-        fprintf(dromajo_stderr, "hartid=%d0           tval 0x%016jx\n", (int)s->mhartid, (uintmax_t)tval);
+        fprintf(dromajo_stderr, "hartid=%d            tval 0x%016jx\n", (int)s->mhartid, (uintmax_t)tval);
     } else {
         fprintf(dromajo_stderr, "hartid=%d: exception %d, epc 0x%016jx\n", (int)s->mhartid, (int)cause, (uintmax_t)s->pc);
         fprintf(dromajo_stderr, "hartid=%d:           tval 0x%016jx\n", (int)s->mhartid, (uintmax_t)tval);
@@ -1611,7 +2090,7 @@ static inline uint32_t get_pending_irq_mask(RISCVCPUState *s) {
 }
 
 static inline int8_t get_irq_platspecific(uint32_t mask) {
-    uint32_t local_ints = mask & ((-1) << 12);
+    uint32_t local_ints = mask & (0xFFFFFFFF << 12);
 
     // get irq number from plat specific section (priority to MSB)
     for (int8_t i = 31; i > 0; --i) {
@@ -1667,9 +2146,8 @@ static int __must_use_result raise_interrupt(RISCVCPUState *s) {
 static inline int32_t sext(int32_t val, int n) { return (val << (32 - n)) >> (32 - n); }
 
 static inline uint32_t get_field1(uint32_t val, int src_pos, int dst_pos, int dst_pos_max) {
-    int mask;
     assert(dst_pos_max >= dst_pos);
-    mask = ((1 << (dst_pos_max - dst_pos + 1)) - 1) << dst_pos;
+    uint32_t mask = ((1 << (dst_pos_max - dst_pos + 1)) - 1) << dst_pos;
     if (dst_pos >= src_pos)
         return (val << (dst_pos - src_pos)) & mask;
     else
@@ -1732,8 +2210,9 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
     s->mem_map         = machine->mem_map;
     s->pc              = machine->reset_vector;
     s->priv            = PRV_M;
-    s->mstatus         = ((uint64_t)2 << MSTATUS_UXL_SHIFT) | ((uint64_t)2 << MSTATUS_SXL_SHIFT) | (PRV_U << MSTATUS_MPP_SHIFT);
-    s->plic_enable_irq = 0;
+    s->mstatus         = ((uint64_t)2 << MSTATUS_UXL_SHIFT) | ((uint64_t)2 << MSTATUS_SXL_SHIFT) | (3 << MSTATUS_MPP_SHIFT);
+    s->plic_enable_irq[0] = 0;
+    s->plic_enable_irq[1] = 0;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
     s->most_recently_written_reg = -1;
 #if FLEN >= 32
@@ -1745,6 +2224,10 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
 #endif
 #if FLEN >= 128
     s->misa |= MCPUID_Q;
+#endif
+#if VLEN > 0
+    clear_most_recently_written_vregs(s);
+    s->misa |= MCPUID_V;
 #endif
     s->misa |= MCPUID_C;
 
@@ -1764,9 +2247,11 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
 
     s->tselect = 0;
     for (int i = 0; i < MAX_TRIGGERS; ++i) {
-        s->tdata1[i] = 2l << 60;
+        s->tdata1[i] = MCONTROL_TYPE_AD_MATCH | MCONTROL_MAXMASK_4;
         s->tdata2[i] = ~(target_ulong)0;
     }
+
+    s->dcsr = (1 << 30) + 3;
 
     tlb_init(s);
 
@@ -1908,6 +2393,13 @@ static uint32_t create_auipc(int rd, uint32_t addr) {
     return 0x17 | ((rd & 0x1F) << 7) | ((addr >> 12) << 12);
 }
 
+/*
+ * Might use it one day, but GCC doesn't like unused static functions
+ * static uint32_t create_lui(int rd, uint32_t addr) {
+ *     return 0x37 | ((rd & 0x1F) << 7) | ((addr >> 12) << 12);
+ * }
+ */
+
 static uint32_t create_addi(int rd, uint32_t addr) {
     uint32_t pos = addr & 0xFFF;
 
@@ -1944,17 +2436,72 @@ static void create_csr12_recovery(uint32_t *rom, uint32_t *code_pos, uint32_t cs
 }
 
 #ifdef LIVECACHE
-static void create_read_warmup(uint32_t *rom, uint32_t *code_pos, uint32_t *data_pos, uint64_t val, uint32_t core_off) {
+static void create_warmup_data(uint32_t *rom, uint32_t *data_pos, uint64_t addr) {
+    rom[(*data_pos)++] = addr & 0xFFFFFFFF;
+    rom[(*data_pos)++] = addr >> 32;
+}
+
+static void create_warmup_loop(uint32_t *rom, uint32_t *code_pos, uint32_t *data_pos, uint32_t warmup_size) {
     uint32_t data_off = sizeof(uint32_t) * (*data_pos - *code_pos);
 
-    rom[(*code_pos)++] = create_auipc(1, data_off);
-    rom[(*code_pos)++] = create_addi(1, data_off);
-    rom[(*code_pos)++] = create_add(1, 1, 3);
-    rom[(*code_pos)++] = create_ld(1, 1);
-    rom[(*code_pos)++] = create_ld(1, 1);
+// The warmup executes a loop very close to this (the total is not needed, but in C is needed to avoid dead-code-elimination.)
+//
+// int warmup_loop(long int *base, unsigned int base_size) {
+//   unsigned int total=0;
+//   for(unsigned int i=0;i<base_size;++i) {
+//     long int addr = base[i];
+//     char *ptr = (char *)addr; // OK to have 1 at LSB because we do LB/SB
+//     if (addr&1)
+//       *ptr = *ptr+1; // THIS IS TO AVOID elimination. should be *ptr+0
+//     else
+//       total += *ptr;
+//   }
+//
+//   return total;
+// }
+//
+// The assembly (without return at pointer check return)
+//
+    rom[(*code_pos)++] = create_auipc(10, data_off);  // s0 == data_pos (or begin of data trace
+    rom[(*code_pos)++] = create_addi(10, data_off);
+    rom[(*code_pos)++] = create_lui(11, warmup_size);
+    rom[(*code_pos)++] = create_addi(11, warmup_size);
 
-    rom[core_off + (*data_pos)++] = val & 0xFFFFFFFF;
-    rom[core_off + (*data_pos)++] = val >> 32;
+//   2: fff5869b                addiw   a3,a1,-1
+    rom[(*code_pos)++] = 0xfff5869b;
+//   6: 1682                slli        a3,a3,0x20
+//   8: 82f5                srli        a3,a3,0x1d
+    rom[(*code_pos)++] = 0x82f51682;
+//   a: 00850793                addi    a5,a0,8
+    rom[(*code_pos)++] = 0x00850793;
+//   e: 96be                add a3,a3,a5
+//  10: 4581                li  a1,0
+    rom[(*code_pos)++] = 0x458196be;
+//  12: a039                j   20 <.L5>
+//
+//  14: 2701                addiw       a4,a4,1 // FIXED to a4,a4,0
+    rom[(*code_pos)++] = 0x2701a039;
+//  16: 00e78023                sb      a4,0(a5)
+    rom[(*code_pos)++] = 0x00e78023;
+//  1a: 0521                addi        a0,a0,8
+//  1c: 00d50c63                beq     a0,a3,34 <.L9>
+    rom[(*code_pos)++] = 0x0c630521;
+//
+//  20: 611c                ld  a5,0(a0)
+    rom[(*code_pos)++] = 0x611c00d5;
+//  22: 0017f613                andi    a2,a5,1
+    rom[(*code_pos)++] = 0x0017f613;
+//  26: 0007c703                lbu     a4,0(a5)
+    rom[(*code_pos)++] = 0x0007c703;
+//  2a: f66d                bnez        a2,14 <.L10>
+//  2c: 0521                addi        a0,a0,8
+    rom[(*code_pos)++] = 0x0521f66d;
+//  2e: 9db9                addw        a1,a1,a4
+//  30: fed518e3                bne     a0,a3,20 <.L5>
+    rom[(*code_pos)++] = 0x18e39db9;
+//  34: 4501                li  a0,0 // A 2 byte NOP to have 4 bytes alignment
+    rom[(*code_pos)++] = 0x4501fed5;
+
 }
 #endif
 
@@ -2064,15 +2611,18 @@ void create_boot_rom(RISCVMachine *m, const char *file, const uint64_t clint_bas
     create_csr12_recovery(rom, &code_pos, 0x7b0, 0x600 | s->priv);
 
 #ifdef LIVECACHE
-    int       addr_size;
-    uint64_t *addr = s->machine->llc->traverse(addr_size);
+    uint64_t  n_addr=0;
+    uint64_t  n_addr_to_skip=0;
+    uint64_t *addr = s->machine->llc->traverse(n_addr);
 
-    if (addr_size > ROMSize / 4) {
-        fprintf(stderr, "LiveCache: truncating boot rom from %d to %d\n", addr_size, ROM_SIZE / 4);
-        addr_size = ROMSize / 4;
+    if (n_addr > (ROM_SIZE-1024)) {
+        fprintf(stderr, "LiveCache: truncating boot rom from %d to %d (you may want to increase ROM_SIZE for better warmup)\n", n_addr, ROM_SIZE-1024);
+        n_addr_to_skip = n_addr - (ROM_SIZE - 1024);
     }
+    uint32_t n_entries = n_addr-n_addr_to_skip;
 
-    for (int i = 0; i < addr_size; ++i) {
+    create_warmup_loop(rom, &code_pos, &data_pos, n_entries);
+    for (size_t i = n_addr_to_skip; i < n_addr; ++i) {
         uint64_t a = addr[i] & ~0x1ULL;
         printf("addr:%llx %s\n", (unsigned long long)a, (addr[i] & 1) ? "ST" : "LD");
         create_read_warmup(rom, &code_pos, &data_pos, a, core_off);  // treat write like reads for the moment
@@ -2117,7 +2667,6 @@ void create_boot_rom(RISCVMachine *m, const char *file, const uint64_t clint_bas
     //create_csr64_recovery(rom, &code_pos, &data_pos, 0x7a0, s->tselect, core_off);  // tselect
     // FIXME: create_csr64_recovery(rom, &code_pos, &data_pos, 0x7a1, s->tdata1); // tdata1
     // FIXME: create_csr64_recovery(rom, &code_pos, &data_pos, 0x7a2, s->tdata2); // tdata2
-    // FIXME: create_csr64_recovery(rom, &code_pos, &data_pos, 0x7a3, s->tdata3); // tdata3
 
     create_csr64_recovery(rom, &code_pos, &data_pos, 0x302, s->medeleg, core_off);
     create_csr64_recovery(rom, &code_pos, &data_pos, 0x303, s->mideleg, core_off);

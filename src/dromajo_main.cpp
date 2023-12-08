@@ -53,6 +53,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "dromajo.h"
 #ifndef __APPLE__
@@ -236,6 +237,7 @@ static int bf_read_async(BlockDevice *bs, uint64_t sector_num, uint8_t *buf, int
             if (!bf->sector_table[sector_num]) {
                 fseek(bf->f, sector_num * SECTOR_SIZE, SEEK_SET);
                 size_t got = fread(buf, 1, SECTOR_SIZE, bf->f);
+                (void) got; // Make GCC happy
                 assert(got == SECTOR_SIZE);
             } else {
                 memcpy(buf, bf->sector_table[sector_num], SECTOR_SIZE);
@@ -246,6 +248,7 @@ static int bf_read_async(BlockDevice *bs, uint64_t sector_num, uint8_t *buf, int
     } else {
         fseek(bf->f, sector_num * SECTOR_SIZE, SEEK_SET);
         size_t got = fread(buf, 1, n * SECTOR_SIZE, bf->f);
+        (void) got; // Make GCC happy
         assert(got == n * SECTOR_SIZE);
     }
     /* synchronous read */
@@ -332,6 +335,7 @@ typedef struct {
 static void tun_write_packet(EthernetDevice *net, const uint8_t *buf, int len) {
     TunState *s   = (TunState *)net->opaque;
     ssize_t   got = write(s->fd, buf, len);
+    (void) got; // Make GCC happy
     assert(got == len);
 }
 
@@ -485,17 +489,17 @@ static EthernetDevice *slirp_open(void) {
 
 #endif /* CONFIG_SLIRP */
 
-BOOL virt_machine_run(RISCVMachine *s, int hartid) {
+BOOL virt_machine_run(RISCVMachine *s, int hartid, int n_cycles) {
     (void)virt_machine_get_sleep_duration(s, hartid, MAX_SLEEP_TIME);
 
-    riscv_cpu_interp64(s->cpu_state[hartid], 1);
+    riscv_cpu_interp64(s->cpu_state[hartid], n_cycles);
     RISCVCPUState *cpu = s->cpu_state[hartid];
     if (s->htif_tohost_addr) {
         uint32_t tohost;
         bool     fail = true;
         tohost        = riscv_phys_read_u32(s->cpu_state[hartid], s->htif_tohost_addr, &fail);
         if (!fail && tohost & 1) {
-            if (tohost != 1) 
+            if (tohost != 1)
                 cpu->benchmark_exit_code = tohost;
             return false;
         }
@@ -564,14 +568,16 @@ static void usage(const char *prog, const char *msg) {
             "       --dtb load in a dtb file (default is dromajo dtb)\n"
             "       --compact_bootrom have dtb be directly after bootrom (default 256B after boot base)\n"
             "       --reset_vector set reset vector for all cores (default 0x%lx)\n"
-            "       --mmio_range START:END [START,END) mmio range for cosim (overridden by config file)\n"
-            "       --plic START:SIZE set PLIC start address and size (defaults to 0x%lx:0x%lx)\n"
-            "       --clint START:SIZE set CLINT start address and size (defaults to 0x%lx:0x%lx)\n"
-            "       --custom_extension add X extension to isa\n"
+            "       --plic START:SIZE set PLIC start address and size in B (defaults to 0x%lx:0x%lx)\n"
+            "       --clint START:SIZE set CLINT start address and size in B (defaults to 0x%lx:0x%lx)\n"
+            "       --custom_extension add X extension to misa for all cores\n"
             "       --enable_amo enables atomic instructions\n"
             "       --enable_mulh enables mulh extention support\n"
             "       --host enable BlackParrot host\n"
             "       --checkpoint_period creates a checkpoint evey N instructions\n",
+#ifdef LIVECACHE
+            "       --live_cache_size live cache warmup for checkpoint (default 8M)\n"
+#endif
             "       --clear_ids clear mvendorid, marchid, mimpid for all cores\n",
             msg,
             CONFIG_VERSION,
@@ -590,13 +596,13 @@ static bool load_elf_and_fake_the_config(VirtMachineParams *p, const char *path)
     uint8_t *buf;
     int      buf_len = load_file(&buf, path);
 
-    if (elf64_is_riscv64(buf, buf_len)) {
+    if (elf64_is_riscv64(buf, buf_len) || isxdigit(buf[0]) && isxdigit(buf[1])) {
         /* Fake the corresponding config file */
         p->files[VM_FILE_BIOS].filename = strdup(path);
         p->files[VM_FILE_BIOS].buf      = buf;
         p->files[VM_FILE_BIOS].len      = buf_len;
         p->ram_size                     = (size_t)256 << 20;  // Default to 256 MiB
-        p->ram_base_addr                = elf64_get_entrypoint(buf);
+        p->ram_base_addr                = RAM_BASE_ADDR;
         elf64_find_global(buf, buf_len, "tohost", &p->htif_base_addr);
 
         return true;
@@ -624,8 +630,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     char *      dtb_name                 = 0;
     bool        compact_bootrom          = false;
     uint64_t    reset_vector_override    = 0;
-    uint64_t    mmio_start_override      = 0;
-    uint64_t    mmio_end_override        = 0;
     uint64_t    plic_base_addr_override  = 0;
     uint64_t    plic_size_override       = 0;
     uint64_t    clint_base_addr_override = 0;
@@ -637,6 +641,11 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     uint64_t    checkpoint_period        = 0;
     const char *simpoint_file            = 0;
     bool        clear_ids                = false;
+#ifdef LIVECACHE
+    uint64_t    live_cache_size          = 8*1024*1024;
+#endif
+    bool        elf_based                = false;
+    bool        allow_ctrlc              = false;
 
     dromajo_stdout = stdout;
     dromajo_stderr = stderr;
@@ -655,14 +664,13 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"maxinsns",                required_argument, 0,  'm' }, // CFG
             {"trace   ",                required_argument, 0,  't' },
             {"ignore_sbi_shutdown",     required_argument, 0,  'P' }, // CFG
-            {"dump_memories",           required_argument, 0,  'D' }, // CFG
+            {"dump_memories",                 no_argument, 0,  'D' }, // CFG
             {"memory_size",             required_argument, 0,  'M' }, // CFG
             {"memory_addr",             required_argument, 0,  'A' }, // CFG
             {"bootrom",                 required_argument, 0,  'b' }, // CFG
             {"compact_bootrom",               no_argument, 0,  'o' },
             {"reset_vector",            required_argument, 0,  'r' }, // CFG
             {"dtb",                     required_argument, 0,  'd' }, // CFG
-            {"mmio_range",              required_argument, 0,  'R' }, // CFG
             {"plic",                    required_argument, 0,  'p' }, // CFG
             {"clint",                   required_argument, 0,  'C' }, // CFG
             {"custom_extension",              no_argument, 0,  'u' }, // CFG
@@ -671,6 +679,10 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"host",                          no_argument, 0,  'h' },
             {"checkpoint_period",       required_argument, 0,  'e' },
             {"clear_ids",                     no_argument, 0,  'L' }, // CFG
+            {"ctrlc",                         no_argument, 0,  'X' },
+#ifdef LIVECACHE
+            {"live_cache_size",         required_argument, 0,  'w' }, // CFG
+#endif
             {0,                         0,                 0,  0 }
         };
         // clang-format on
@@ -680,6 +692,9 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             break;
 
         switch (c) {
+            case 'X':
+                allow_ctrlc = true;
+                break;
             case 'c':
                 if (cmdline)
                     usage(prog, "already had a kernel command line");
@@ -768,25 +783,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
                 reset_vector_override = strtoll(optarg + 2, NULL, 16);
                 break;
 
-            case 'R': {
-                if (!strchr(optarg, ':'))
-                    usage(prog, "--mmio_range expects an argument like START:END");
-
-                char *copy       = strdup(optarg);
-                char *mmio_start = strtok(copy, ":");
-                char *mmio_end   = strtok(NULL, ":");
-
-                if (mmio_start[0] != '0' || mmio_start[1] != 'x')
-                    usage(prog, "--mmio_range START address must begin with 0x...");
-                mmio_start_override = strtoll(mmio_start + 2, NULL, 16);
-
-                if (mmio_end[0] != '0' || mmio_end[1] != 'x')
-                    usage(prog, "--mmio_range END address must begin with 0x...");
-                mmio_end_override = strtoll(mmio_end + 2, NULL, 16);
-
-                free(copy);
-            } break;
-
             case 'p': {
                 if (!strchr(optarg, ':'))
                     usage(prog, "--plic expects an argument like START:SIZE");
@@ -849,6 +845,23 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
                 break;
             case 'L': clear_ids = true; break;
 
+#ifdef LIVECACHE
+            case 'w':
+                if (live_cache_size)
+                    usage(prog, "already had a live_cache_size");
+                live_cache_size = (uint64_t)atoll(optarg);
+                {
+                    char last = optarg[strlen(optarg) - 1];
+                    if (last == 'k' || last == 'K')
+                        live_cache_size *= 1000;
+                    else if (last == 'm' || last == 'M')
+                        live_cache_size *= 1000000;
+                    else if (last == 'g' || last == 'G')
+                        live_cache_size *= 1000000000;
+                }
+                break;
+#endif
+
             default: usage(prog, "I'm not having this argument");
         }
     }
@@ -858,8 +871,10 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     else
         path = argv[optind++];
 
+/*
     if (optind < argc)
         usage(prog, "too many arguments");
+*/
 
     assert(path);
     BlockDeviceModeEnum drive_mode = BF_MODE_SNAPSHOT;
@@ -870,8 +885,11 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     fs_wget_init();
 #endif
 
-    if (!load_elf_and_fake_the_config(p, path))
+    if (!load_elf_and_fake_the_config(p, path)) {
         virt_machine_load_config_file(p, path, NULL, NULL);
+    } else {
+        elf_based = true;
+    }
 
     if (p->logfile) {
         FILE *log_out = fopen(p->logfile, "w");
@@ -879,9 +897,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             perror(p->logfile);
             exit(1);
         }
-
-        dromajo_stdout = log_out;
-        dromajo_stderr = log_out;
     }
 
 #ifdef CONFIG_FS_NET
@@ -976,7 +991,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
         }
     }
 
-    p->console       = console_init(TRUE, stdin, dromajo_stdout);
+    p->console       = console_init(allow_ctrlc, stdin, dromajo_stdout);
     p->dump_memories = dump_memories;
 
     // Setup bootrom params
@@ -989,12 +1004,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     // Setup particular reset vector
     if (reset_vector_override)
         p->reset_vector = reset_vector_override;
-
-    // MMIO ranges
-    if (mmio_start_override)
-        p->mmio_start = mmio_start_override;
-    if (mmio_end_override)
-        p->mmio_end = mmio_end_override;
 
     // PLIC params
     if (plic_base_addr_override)
@@ -1028,6 +1037,29 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     RISCVMachine *s = virt_machine_init(p);
     if (!s)
         return NULL;
+
+#ifdef LIVECACHE
+    // LiveCache (should be ~2x larger than real LLC)
+    s->llc = new LiveCache("LiveCache", live_cache_size, p->ram_base_addr, p->ram_size);
+#endif
+
+    if (elf_based) {
+        for (int j = 0, i = optind - 1; i < argc; ++i, ++j) {
+            uint8_t *buf;
+            int      buf_len = load_file(&buf, argv[i]);
+
+            if (elf64_is_riscv64(buf, buf_len)) {
+                load_elf_image(s, buf, buf_len);
+            } else
+                load_hex_image(s, buf, buf_len);
+        }
+        for (int i = 0; i < (int)p->ncpus; ++i)
+            s->cpu_state[i]->debug_mode = true;
+    } else {
+        s  = virt_machine_load(p, s);
+        if (!s)
+            return NULL;
+    }
 
     // Overwrite the value specified in the configuration file
     if (snapshot_load_name) {

@@ -121,8 +121,10 @@ int simpoint_step(RISCVMachine *m, int hartid) {
 }
 #endif
 
-int iterate_core(RISCVMachine *m, int hartid) {
-    if (m->common.maxinsns == m->cpu_state[hartid]->minstret)
+static int iterate_core(RISCVMachine *m, int hartid, int n_cycles) {
+    m->common.maxinsns -= n_cycles;
+
+    if (m->common.maxinsns <= 0)
         /* Succeed after N instructions without failure. */
         return 0;
 
@@ -134,9 +136,11 @@ int iterate_core(RISCVMachine *m, int hartid) {
     uint64_t last_pc  = virt_machine_get_pc(m, hartid);
     int      priv     = riscv_get_priv_level(cpu);
     uint32_t insn_raw = -1;
+    bool     do_trace = false;
+
     (void)riscv_read_insn(cpu, &insn_raw, last_pc);
 
-    uint64_t instret = cpu->minstret;
+    uint64_t instret = m->common.maxinsns;
     uint64_t period  = m->checkpoint_period;
     if(period != 0 && (instret % period == 0) &&
        m->common.snapshot_save_name && !cpu->debug_mode) {
@@ -145,12 +149,15 @@ int iterate_core(RISCVMachine *m, int hartid) {
         virt_machine_serialize(m, name.c_str());
     }
 
-    int keep_going = virt_machine_run(m, hartid);
-    if (last_pc == virt_machine_get_pc(m, hartid))
-        return 0;
+    if (m->common.trace < (unsigned) n_cycles) {
+        n_cycles = 1;
+        do_trace = true;
+    } else
+      m->common.trace -= n_cycles;
 
-    if (m->common.trace) {
-        --m->common.trace;
+    int keep_going = virt_machine_run(m, hartid, n_cycles);
+
+    if (!do_trace) {
         return keep_going;
     }
 
@@ -173,10 +180,30 @@ int iterate_core(RISCVMachine *m, int hartid) {
         fprintf(dromajo_stderr, " x%2d 0x%016" PRIx64, iregno, virt_machine_get_reg(m, hartid, iregno));
     else if (fregno >= 0)
         fprintf(dromajo_stderr, " f%2d 0x%016" PRIx64, fregno, virt_machine_get_fpreg(m, hartid, fregno));
+    else
+        for (int i = 31; i >= 0; i--)
+            if (cpu->most_recently_written_vregs[i]) {
+                fprintf(dromajo_stderr, " v%2d 0x", i);
+                for (int j = VLEN / 8 - 1; j >= 0; j--) {
+                    fprintf(dromajo_stderr, "%02" PRIx8, cpu->v_reg[i][j]);
+                }
+            }
+
 
     putc('\n', dromajo_stderr);
 
     return keep_going;
+}
+
+static double execution_start_ts;
+static uint64_t *execution_progress_meassure;
+
+
+static void sigintr_handler(int dummy) {
+    double t = get_current_time_in_seconds();
+    fprintf(dromajo_stderr, "Simulation speed: %5.2f MIPS (single-core)\n",
+            1e-6 * *execution_progress_meassure / (t - execution_start_ts));
+    exit(1);
 }
 
 int main(int argc, char **argv) {
@@ -203,18 +230,18 @@ int main(int argc, char **argv) {
     }
 #endif
 
-#ifdef LIVECACHE
-    // m->llc = new LiveCache("LLC", 1024*1024*32); // 32MB LLC (should be ~2x larger than real)
-    m->llc = new LiveCache("LLC", 1024 * 32);  // Small 32KB for testing
-#endif
-
     if (!m)
         return 1;
+
+    int n_cycles = 10000;
+    execution_start_ts = get_current_time_in_seconds();
+    execution_progress_meassure = &m->cpu_state[0]->minstret;
+    signal(SIGINT, sigintr_handler);
 
     int keep_going;
     do {
         keep_going = 0;
-        for (int i = 0; i < m->ncpus; ++i) keep_going |= iterate_core(m, i);
+        for (int i = 0; i < m->ncpus; ++i) keep_going |= iterate_core(m, i, n_cycles);
 #ifdef SIMPOINT_BB
         if (simpoint_roi) {
             if (!simpoint_step(m, 0))
@@ -222,6 +249,8 @@ int main(int argc, char **argv) {
         }
 #endif
     } while (keep_going);
+
+    double t = get_current_time_in_seconds();
 
     for (int i = 0; i < m->ncpus; ++i) {
         int benchmark_exit_code = riscv_benchmark_exit_code(m->cpu_state[i]);
@@ -231,6 +260,9 @@ int main(int argc, char **argv) {
         }
     }
 
+    fprintf(dromajo_stderr, "Simulation speed: %5.2f MIPS (single-core)\n",
+            1e-6 * *execution_progress_meassure / (t - execution_start_ts));
+
     fprintf(dromajo_stderr, "\nPower off.\n");
 
     virt_machine_end(m);
@@ -239,10 +271,10 @@ int main(int argc, char **argv) {
 #ifdef LIVECACHE
 #if 0
     // LiveCache Dump
-    int addr_size;
+    uint64_t addr_size;
     uint64_t *addr = m->llc->traverse(addr_size);
 
-    for (int i = 0; i < addr_size; ++i) {
+    for (uint64_t i = 0u; i < addr_size; ++i) {
         printf("addr:%llx %s\n", (unsigned long long)addr[i], (addr[i] & 1) ? "ST" : "LD");
     }
 #endif

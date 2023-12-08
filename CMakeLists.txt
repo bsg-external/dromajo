@@ -44,11 +44,14 @@ project(dromajo)
 option(TRACEOS "TRACEOS" OFF)
 option(SIMPOINT "SIMPOINT" OFF)
 option(GOLDMEM "GOLDMEM" OFF)
+option(WARMUP "WARMUP" OFF)
 
 #set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 add_compile_options(
+        -g
         -std=c++11
+        -g
         -Wall
         -Wno-parentheses
         -MMD
@@ -84,6 +87,11 @@ add_link_options(
 # Set Version Header
 set(CONFIG_VERSION "Dromajo-0.1")
 configure_file(include/config.h.in config.h @ONLY)
+
+if (WARMUP)
+  message(STATUS "Checkpoint with WARMUP is on (typically for simpoints, but any checkpoint can use it).")
+    add_compile_options( -DLIVECACHE)
+endif ()
 
 if (GOLDMEM)
     message(STATUS "GOLDMEM is on.")
@@ -135,10 +143,11 @@ else ()
 endif ()
 
 if (${CMAKE_HOST_APPLE})
-    include_directories(/usr/local/include /usr/local/include/libelf)
-    target_link_libraries(dromajo_cosim -L/usr/local/lib -lelf)
+    include_directories(/usr/local/include /usr/local/include/libelf /opt/homebrew/include /opt/homebrew/include/libelf)
+    target_link_libraries(dromajo_cosim -L/usr/local/lib -L/opt/homebrew/lib -lelf)
 else ()
     # add librt for Linux
     target_link_libraries(dromajo_cosim rt)
 endif ()
 
+install(TARGETS dromajo_cosim DESTINATION .)

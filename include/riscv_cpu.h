@@ -44,7 +44,7 @@
 
 #include "riscv.h"
 
-#define ROM_SIZE       0x00001000
+#define ROM_SIZE       0x00002000
 #define ROM_BASE_ADDR  0x00010000
 #define BOOT_BASE_ADDR 0x00010000
 
@@ -94,6 +94,38 @@ typedef uint128_t fp_uint;
 #else
 #error unsupported FLEN
 #endif
+#endif
+
+/* VLEN is the vector register width */
+#define IS_PO2(n)    ((n) && ((n) & ((n)-1)) == 0)
+#define ELEN_MIN     (1 << 3)
+#define VLEN_MAX     (1 << 16)
+#define ELEN_DEFAULT (1 << 6)
+#define VLEN_DEFAULT (1 << 7)
+/* Modify these lines to fit architectural params */
+//#define VLEN <size_in_bits_here>
+//#define ELEN <typically_default_but_might_be_rattified>
+/* Uncomment the next line to DISABLE Vector Simulation "V-extension" */
+//#define VLEN 0
+/* Uncomment the next line to have masked elements under mask-agnotic policy be filled with 1's
+ * useful for vector register renaming, where masked elements dont need to be copied */
+//#define MASK_AGNOSTIC_FILL 1
+#ifndef VLEN
+#define VLEN VLEN_DEFAULT
+#endif
+#ifndef ELEN
+#define ELEN ELEN_DEFAULT
+#endif
+#if (ELEN < ELEN_MIN || VLEN < ELEN || !IS_PO2(ELEN))
+#undef ELEN
+#define ELEN ELEN_DEFAULT
+#endif
+#if (VLEN_MAX < VLEN || VLEN < ELEN || !IS_PO2(VLEN))
+#undef VLEN
+#define VLEN VLEN_DEFAULT
+#endif
+#if VLEN > 0
+#include "vector_template.h"
 #endif
 
 /* MLEN is the maximum memory access width */
@@ -181,8 +213,21 @@ typedef struct RISCVCPUState {
     uint8_t  frm;
 #endif
 
+#if VLEN > 0
+    uint8_t  v_reg[32][VLEN / 8];
+    bool     most_recently_written_vregs[32];
+
+    /* CSRs */
+    uint16_t     vstart;
+    uint8_t      vxsat;
+    uint8_t      vxrm;
+    target_ulong vtype; /* ro */
+    target_ulong vl;    /* ro */
+#endif
+
     uint8_t priv; /* see PRV_x */
     uint8_t fs;   /* MSTATUS_FS value */
+    uint8_t vs;   /* MSTATUS_VS value */
 
     uint64_t insn_counter;  // Simulator internal
     uint64_t minstret;      // RISCV CSR (updated when insn_counter increases)
@@ -218,7 +263,6 @@ typedef struct RISCVCPUState {
     uint32_t     tselect;
     target_ulong tdata1[MAX_TRIGGERS];
     target_ulong tdata2[MAX_TRIGGERS];
-    target_ulong tdata3[MAX_TRIGGERS];
 
     target_ulong mhpmevent[32];
 
@@ -244,9 +288,19 @@ typedef struct RISCVCPUState {
     target_ulong dpc;       // Debug DPC 0x7b1 (debug spec only)
     target_ulong dscratch;  // Debug dscratch 0x7b2 (debug spec only)
 
-    uint32_t plic_enable_irq;
+    uint32_t plic_enable_irq[2];
 
+    /*
+     * "The SC must fail if a store to the reservation set from
+     * another hart can be observed to occur between the LR and SC."
+     *
+     * To achieve this in a scalable and low-overhead way we maintain
+     * a sequence number for global memory and one per reservation.
+     * As long as the reservation tracks the global number, we know no
+     * other hart has written memory.
+     */
     target_ulong load_res; /* for atomic LR/SC */
+    uint64_t     load_res_memseqno;
 
     PhysMemoryMap *mem_map;
     int            physical_addr_len;

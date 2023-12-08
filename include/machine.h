@@ -48,6 +48,11 @@ typedef struct FBDevice FBDevice;
 
 typedef void SimpleFBDrawFunc(FBDevice *fb_dev, void *opaque, int x, int y, int w, int h);
 
+typedef void dromajo_logging_func_t(int hartid, const char *fmt, ...);
+
+#ifndef MACHINE_H
+#define MACHINE_H
+
 struct FBDevice {
     /* the following is set by the device */
     int      width;
@@ -58,9 +63,6 @@ struct FBDevice {
     void *   device_opaque;
     void (*refresh)(struct FBDevice *fb_dev, SimpleFBDrawFunc *redraw_func, void *opaque);
 };
-
-#ifndef MACHINE_H
-#define MACHINE_H
 
 #include <stdint.h>
 
@@ -114,11 +116,6 @@ typedef struct {
     EthernetDevice *net;
 } VMEthEntry;
 
-typedef struct AddressSet {
-    uint64_t start;
-    uint64_t size;
-} AddressSet;
-
 #ifdef SIMPOINT_BB
 #include <vector>
 struct Simpoint {
@@ -169,12 +166,6 @@ typedef struct {
 
     /* number of cpus */
     uint64_t ncpus;
-
-    /* MMIO range (for co-simulation only) */
-    uint64_t    mmio_start;
-    uint64_t    mmio_end;
-    AddressSet *mmio_addrset;
-    uint64_t    mmio_addrset_size;
 
     /* PLIC/CLINT Params */
     uint64_t plic_base_addr;
@@ -229,6 +220,12 @@ typedef struct VirtMachine {
 
     /* For co-simulation only */
     bool cosim;
+    int  pending_interrupt;
+    int  pending_exception;
+
+    /* Central logging facility, so far only used in dromajo_cosim */
+    dromajo_logging_func_t *error_log;
+    dromajo_logging_func_t *debug_log;
 } VirtMachine;
 
 int load_file(uint8_t **pbuf, const char *filename);
@@ -242,10 +239,13 @@ void        vm_add_cmdline(VirtMachineParams *p, const char *cmdline);
 char *      get_file_path(const char *base_filename, const char *filename);
 void        virt_machine_free_config(VirtMachineParams *p);
 RISCVMachine *virt_machine_init(const VirtMachineParams *p);
+RISCVMachine *virt_machine_load(const VirtMachineParams *p, RISCVMachine *s);
 int           virt_machine_get_sleep_duration(RISCVMachine *s, int hartid, int delay);
 BOOL          vm_mouse_is_absolute(RISCVMachine *s);
 void          vm_send_mouse_event(RISCVMachine *s1, int dx, int dy, int dz, unsigned int buttons);
 void          vm_send_key_event(RISCVMachine *s1, BOOL is_down, uint16_t key_code);
+void load_elf_image(RISCVMachine *s, const uint8_t *image, size_t image_len);
+void load_hex_image(RISCVMachine *s, uint8_t *image, size_t image_len);
 
 /* gui */
 void sdl_refresh(RISCVMachine *m);
@@ -269,7 +269,7 @@ RISCVMachine *virt_machine_main(int argc, char **argv);
 void          virt_machine_end(RISCVMachine *s);
 void          virt_machine_serialize(RISCVMachine *m, const char *dump_name);
 void          virt_machine_deserialize(RISCVMachine *m, const char *dump_name);
-BOOL          virt_machine_run(RISCVMachine *m, int hartid);
+BOOL          virt_machine_run(RISCVMachine *m, int hartid, int n_cycles);
 uint64_t      virt_machine_get_pc(RISCVMachine *m, int hartid);
 uint64_t      virt_machine_get_reg(RISCVMachine *m, int hartid, int rn);
 uint64_t      virt_machine_get_fpreg(RISCVMachine *m, int hartid, int rn);

@@ -56,8 +56,8 @@
 /* Hooks */
 typedef struct RISCVMachineHooks {
     /* Returns -1 if invalid CSR, 0 if OK. */
-    int (*csr_read)(RISCVCPUState *s, uint32_t csr, uint64_t *pval);
-    int (*csr_write)(RISCVCPUState *s, uint32_t csr, uint64_t val);
+    int (*csr_read)(RISCVCPUState *s, uint32_t funct3, uint32_t csr, uint64_t *pval);
+    int (*csr_write)(RISCVCPUState *s, uint32_t funct3, uint32_t csr, uint64_t val);
 } RISCVMachineHooks;
 
 struct RISCVMachine {
@@ -68,6 +68,14 @@ struct RISCVMachine {
     LiveCache *llc;
 #endif
     RISCVCPUState *cpu_state[MAX_CPUS];
+
+    /*
+     * Each write to memory increases the memseqno.  We use this to
+     * enable SC to invalidate a load reservation if memory has been
+     * written by an external agent (including another hart).
+     */
+    uint64_t memseqno;
+
     int            ncpus;
     uint64_t       ram_size;
     uint64_t       ram_base_addr;
@@ -84,23 +92,20 @@ struct RISCVMachine {
 
     int virtio_count;
 
-    /* MMIO range (for co-simulation only) */
-    uint64_t    mmio_start;
-    uint64_t    mmio_end;
-    AddressSet *mmio_addrset;
-    uint64_t    mmio_addrset_size;
-
     /* Reset vector */
     uint64_t reset_vector;
 
     /* Bootrom Params */
     bool compact_bootrom;
+    bool bootrom_loaded;
 
     /* PLIC/CLINT Params */
     uint64_t plic_base_addr;
     uint64_t plic_size;
     uint64_t clint_base_addr;
     uint64_t clint_size;
+
+    uint64_t initrd_start;
 
     /* Append to misa custom extensions */
     bool custom_extension;
@@ -158,7 +163,7 @@ struct RISCVMachine {
 #define IDE_BASE_ADDR         0x40009000
 #define VIRTIO_BASE_ADDR      0x40010000
 #define VIRTIO_SIZE           0x1000
-#define VIRTIO_IRQ            1
+#define VIRTIO_IRQ            4
 #define FRAMEBUFFER_BASE_ADDR 0x41000000
 
 // sifive,uart, same as qemu UART0 (qemu has 2 sifive uarts)
@@ -169,6 +174,6 @@ struct RISCVMachine {
 #define UART0_BASE_ADDR 0x54000000
 #define UART0_SIZE      32
 #endif
-#define UART0_IRQ 3
+#define UART0_IRQ       3
 
 #endif

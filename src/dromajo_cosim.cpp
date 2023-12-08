@@ -43,9 +43,8 @@ void check_inorder_init(int ncores);
 dromajo_cosim_state_t *dromajo_cosim_init(int argc, char *argv[]) {
     RISCVMachine *m = virt_machine_main(argc, argv);
 
-#ifdef LIVECACHE
-    // m->llc = new LiveCache("LLC", 1024*1024*32); // 32MB LLC (should be ~2x larger than real)
-    m->llc = new LiveCache("LLC", 1024 * 32);  // Small 32KB for testing
+#ifdef GOLDMEM_INORDER
+    check_inorder_init(m->ncpus);
 #endif
 #ifdef GOLDMEM_INORDER
     check_inorder_init(m->ncpus);
@@ -66,9 +65,8 @@ static bool is_store_conditional(uint32_t insn) {
 }
 
 static inline uint32_t get_field1(uint32_t val, int src_pos, int dst_pos, int dst_pos_max) {
-    int mask;
     assert(dst_pos_max >= dst_pos);
-    mask = ((1 << (dst_pos_max - dst_pos + 1)) - 1) << dst_pos;
+    uint32_t mask = ((1 << (dst_pos_max - dst_pos + 1)) - 1) << dst_pos;
     if (dst_pos >= src_pos)
         return (val << (dst_pos - src_pos)) & mask;
     else
@@ -98,29 +96,18 @@ static inline bool is_amo(uint32_t insn) {
 
 /*
  * is_mmio_load() --
- * calculated the effective address and check if the physical backing
- * is MMIO space.  NB: get_phys_addr() is the identity if the CPU is
+ * mmio values are copied from DUT, simple check to see if it is RAM/Virt Device
+ * Is considered mmio if it isn't RAM/VIRT Device which have addressed declared explicitly
+ * NB: get_phys_addr() is the identity if the CPU is
  * running without virtual memory enabled.
  */
-static inline bool is_mmio_load(RISCVCPUState *s, int reg, int offset, uint64_t mmio_start, uint64_t mmio_end) {
+static inline bool is_mmio_load(RISCVCPUState *s, int reg, int offset, size_t size) {
     uint64_t pa;
     uint64_t va = riscv_get_reg_previous(s, reg) + offset;
 
-    if (!riscv_cpu_get_phys_addr(s, va, ACCESS_READ, &pa) && mmio_start <= pa && pa < mmio_end) {
-        return true;
-    }
+    riscv_cpu_get_phys_addr(s, va, ACCESS_READ, &pa);
 
-    if (s->machine->mmio_addrset_size > 0) {
-        RISCVMachine *m = s->machine;
-        for (size_t i = 0; i < m->mmio_addrset_size; ++i) {
-            uint64_t start = m->mmio_addrset[i].start;
-            uint64_t end   = m->mmio_addrset[i].start + m->mmio_addrset[i].size;
-            if (!riscv_cpu_get_phys_addr(s, va, ACCESS_READ, &pa) && start <= pa && pa < end)
-                return true;
-        }
-    }
-
-    return false;
+    return riscv_cpu_pmp_access_ok(s, pa, size, PMPCFG_R) && !get_phys_mem_range(s->mem_map, pa);
 }
 
 /*
@@ -133,14 +120,14 @@ static inline bool is_mmio_load(RISCVCPUState *s, int reg, int offset, uint64_t 
  *
  * Right now we handle just mcycle.
  */
-static inline void handle_dut_overrides(RISCVCPUState *s, uint64_t mmio_start, uint64_t mmio_end, int priv, uint64_t pc,
+static inline void handle_dut_overrides(RISCVCPUState *s, int priv, uint64_t pc,
                                         uint32_t insn, uint64_t emu_wdata, uint64_t dut_wdata) {
     int opcode = insn & 0x7f;
     int csrno  = insn >> 20;
     int rd     = (insn >> 7) & 0x1f;
     int rdc    = ((insn >> 2) & 7) + 8;
     int reg, offset;
-
+    size_t size = (insn >> 12) & 3;
     /* Catch reads from CSR mcycle, ucycle, instret, hpmcounters,
      * hpmoverflows, mip, and sip.
      * If the destination register is x0 then it is actually a csr-write
@@ -167,7 +154,7 @@ static inline void handle_dut_overrides(RISCVCPUState *s, uint64_t mmio_start, u
     } else
         return;
 
-    if (is_mmio_load(s, reg, offset, mmio_start, mmio_end)) {
+    if (is_mmio_load(s, reg, offset, size)) {
         riscv_set_reg(s, rd, dut_wdata);
     }
 }
@@ -184,14 +171,12 @@ void dromajo_cosim_raise_trap(dromajo_cosim_state_t *state, int hartid, int64_t 
     RISCVCPUState *s = r->cpu_state[hartid];
 
     if (cause < 0) {
-        assert(s->dut_interrupt == -1);
-        s->dut_interrupt = cause & 63;
-        if (verbose)
-            fprintf(dromajo_stderr, "[DEBUG] DUT raised interrupt %d\n", s->dut_interrupt);
+        assert(m->pending_interrupt == -1);
+        m->pending_interrupt = cause & 63;
+        (m->debug_log)(hartid, "[DEBUG] DUT raised interrupt %d\n", m->pending_interrupt);
     } else {
-        s->dut_exception = cause;
-        if (verbose)
-            fprintf(dromajo_stderr, "[DEBUG] DUT raised exception %d\n", s->dut_exception);
+        m->pending_exception = cause;
+        (m->debug_log)(hartid, "[DEBUG] DUT raised exception %d\n", m->pending_exception);
     }
 }
 
@@ -211,16 +196,19 @@ void dromajo_cosim_raise_trap(dromajo_cosim_state_t *state, int hartid, int64_t 
  * with the expected values.
  */
 int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc, uint32_t dut_insn, uint64_t dut_wdata,
-                       uint64_t dut_mstatus, bool check, bool verbose) {
+                       uint64_t dut_mstatus, bool check) {
     RISCVMachine *r = (RISCVMachine *)state;
     assert(r->ncpus > hartid);
     RISCVCPUState *s = r->cpu_state[hartid];
+    VirtMachine    m = r->common;
     uint64_t       emu_pc, emu_wdata = 0;
     int            emu_priv;
     uint32_t       emu_insn;
     bool           emu_wrote_data = false;
     int            exit_code      = 0;
     int            iregno, fregno;
+    char           log_buffer[512];
+    int            log_buff_space;
 
     /* Succeed after N instructions without failure. */
     if (r->common.maxinsns == 0) {
@@ -267,8 +255,7 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
             /* On the DUT, the interrupt can race the exception.
                Let's try to match that behavior */
 
-            if (verbose)
-                fprintf(dromajo_stderr, "[DEBUG] DUT also raised exception %d\n", s->dut_exception);
+            (m.debug_log)(hartid, "[DEBUG] DUT also raised exception %d\n", r->common.pending_exception);
             riscv_cpu_interp64(s, 1);  // Advance into the exception
 
             int cause = s->priv == PRV_S ? s->scause : s->mcause;
@@ -279,26 +266,20 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
                 /* Unfortunately, handling the error case is awkward,
                  * so we just exit from here */
 
-                fprintf(dromajo_stderr, "%d 0x%016" PRIx64 " ", emu_priv, emu_pc);
-                fprintf(dromajo_stderr, "(0x%08x) ", emu_insn);
-                fprintf(dromajo_stderr,
-                        "[error] EMU %cCAUSE %d != DUT %cCAUSE %d\n",
-                        priv,
-                        cause,
-                        priv,
-                        s->dut_exception);
+                log_buff_space = snprintf(log_buffer, 512, "%d 0x%016" PRIx64 " ", emu_priv, emu_pc);
+                log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, " (0x%08x) ", emu_insn);
+                log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "[error] EMU %cCAUSE %d != DUT %cCAUSE %d\n",
+                                                                          priv, cause, priv, r->common.pending_exception);
+                (m.error_log)(hartid, log_buffer);
 
                 return 0x1FFF;
             }
         }
 
-        if (s->dut_interrupt != -1) {
-            riscv_cpu_set_mip(s, riscv_cpu_get_mip(s) | 1 << s->dut_interrupt);
-            if (verbose)
-                fprintf(dromajo_stderr,
-                        "[DEBUG] Interrupt: MIP <- %d: Now MIP = %x\n",
-                        s->dut_interrupt,
-                        riscv_cpu_get_mip(s));
+        if (r->common.pending_interrupt != -1) {
+            riscv_cpu_set_mip(s, riscv_cpu_get_mip(s) | 1 << r->common.pending_interrupt);
+            (m.debug_log)(hartid, "[DEBUG] Interrupt: MIP <- %d: Now MIP = %x\n", r->common.pending_interrupt,
+                          riscv_cpu_get_mip(s));
         }
 
         if (riscv_cpu_interp64(s, 1) != 0) {
@@ -421,49 +402,159 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
     }
 #endif
 
-    if (check)
-        handle_dut_overrides(s, r->mmio_start, r->mmio_end, emu_priv, emu_pc, emu_insn, emu_wdata, dut_wdata);
+#ifdef GOLDMEM_INORDER
+    bool do_clw = (dut_insn & 0x3) == 0 && (dut_insn & 0xe000) == 0x4000;
+    bool do_cld = (dut_insn & 0x3) == 0 && (dut_insn & 0xe000) == 0x6000;
+    bool do_csw = (dut_insn & 0x3) == 0 && (dut_insn & 0xe000) == 0xC000;
+    bool do_csd = (dut_insn & 0x3) == 0 && (dut_insn & 0xe000) == 0xe000;
 
+    bool do_clwsp = (dut_insn & 0x3) == 2 && (dut_insn & 0xe000) == 0x4000;
+    bool do_cldsp = (dut_insn & 0x3) == 2 && (dut_insn & 0xe000) == 0x6000;
+    bool do_cswsp = (dut_insn & 0x3) == 2 && (dut_insn & 0xe000) == 0xC000;
+    bool do_csdsp = (dut_insn & 0x3) == 2 && (dut_insn & 0xe000) == 0xe000;
+
+    bool do_ld  = (dut_insn & 0x7F) == 0x03 || (dut_insn & 0x7F) == 0x07;
+    bool do_ist = (dut_insn & 0x7F) == 0x23;
+    bool do_fst = (dut_insn & 0x7F) == 0x27;
+    bool do_amo = (dut_insn & 0x7F) == 0x2F;
+    if (do_fst || do_ist || do_ld || do_amo) {
+        uint8_t func3 = (dut_insn >> 12) & 0x7;
+        int     sz    = 0;
+        switch (func3) {
+            case 0: sz = 1; break;
+            case 1: sz = 2; break;
+            case 2: sz = 4; break;
+            case 3: sz = 8; break;
+            case 4: sz = 1; break;
+            case 5: sz = 2; break;
+            case 6: sz = 4; break;
+            default: sz = 0;
+        }
+
+        uint64_t         paddr  = s->last_data_paddr;
+        PhysMemoryRange *pr     = get_phys_mem_range(s->mem_map, paddr);
+        bool             io_map = !pr || !pr->is_ram;
+        if (do_ld) {
+            check_inorder_load(hartid, paddr, sz, dut_wdata, io_map);
+        } else if (do_ist || do_fst) {
+            uint64_t data = 0;
+            uint8_t  rs2  = (dut_insn >> 20) & 0x1f;
+            if (do_ist) {
+                data = riscv_get_reg(s, rs2);
+            } else {
+                data = riscv_get_fpreg(s, rs2);
+            }
+
+            // Track same thing in two different ways (needed for atomics)
+            assert(data == s->last_data_value);
+
+            check_inorder_store(hartid, paddr, sz, data, io_map);
+        } else if (do_amo) {
+            uint8_t func5 = (dut_insn >> 27) & 0x1F;
+
+            // dut_wdata is the load result in DUT
+            uint8_t  rd          = (dut_insn >> 7) & 0x1f;
+            uint64_t amo_rd_data = riscv_get_reg(s, rd);
+            assert(dut_wdata == amo_rd_data);
+
+            bool rl = (dut_insn >> 25) & 1;
+            bool aq = (dut_insn >> 26) & 1;
+            if (rl || aq) {
+                fprintf(dromajo_stderr, "FIXME: implement aq/rl in goldmem\n");
+            }
+
+            if (func5 == 0x02) {
+                fprintf(dromajo_stderr, "FIXME: implement ll in goldmem\n");
+                exit(-3);
+            } else if (func5 == 3) {
+                fprintf(dromajo_stderr, "FIXME: implement sc in goldmem\n");
+                exit(-3);
+            } else {  // all the other amoadd/amooand/... ops
+                check_inorder_amo(hartid, paddr, sz, s->last_data_value, dut_wdata, io_map);
+            }
+        } else {
+            fprintf(dromajo_stderr, "FIXME: unknown opcode with goldmem\n");
+            exit(-3);
+        }
+    } else if (do_clw || do_cld || do_clwsp || do_cldsp) {
+        int sz = 4;
+        if (do_cld || do_cldsp)
+            sz = 8;
+
+        uint64_t         paddr  = s->last_data_paddr;
+        PhysMemoryRange *pr     = get_phys_mem_range(s->mem_map, paddr);
+        bool             io_map = !pr || !pr->is_ram;
+
+        check_inorder_load(hartid, paddr, sz, dut_wdata, io_map);
+    } else if (do_csw || do_csd || do_cswsp || do_csdsp) {
+        int sz = 4;
+        if (do_csd || do_csdsp)
+            sz = 8;
+
+        uint8_t rs2 = (dut_insn >> 2) & 0x1f;
+        if (do_csw || do_csd) {
+            rs2 = (dut_insn >> 2) & 0x7;
+            rs2 += 8;
+        }
+
+        uint64_t data = riscv_get_reg(s, rs2);
+
+        uint64_t         paddr  = s->last_data_paddr;
+        PhysMemoryRange *pr     = get_phys_mem_range(s->mem_map, paddr);
+        bool             io_map = !pr || !pr->is_ram;
+
+        check_inorder_store(hartid, paddr, sz, data, io_map);
+    }
+#endif
+
+    if (check) {
+        handle_dut_overrides(s, emu_priv, emu_pc, emu_insn, emu_wdata, dut_wdata);
+    }
+
+    log_buff_space = 0;
     if (verbose) {
-        fprintf(dromajo_stderr, "%d 0x%016" PRIx64 " ", emu_priv, emu_pc);
-        fprintf(dromajo_stderr, "(0x%08x) ", emu_insn);
+        log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "%d 0x%016" PRIx64 " ", emu_priv, emu_pc);
+        log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "(0x%08x) ", emu_insn);
     }
 
     if (iregno > 0) {
         emu_wdata      = riscv_get_reg(s, iregno);
         emu_wrote_data = 1;
         if (verbose)
-            fprintf(dromajo_stderr, "x%-2d 0x%016" PRIx64, iregno, emu_wdata);
+            log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "x%-2d 0x%016" PRIx64, iregno, emu_wdata);
     } else if (fregno >= 0) {
         emu_wdata      = riscv_get_fpreg(s, fregno);
         emu_wrote_data = 1;
         if (verbose)
-            fprintf(dromajo_stderr, "f%-2d 0x%016" PRIx64, fregno, emu_wdata);
+            log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "f%-2d 0x%016" PRIx64, fregno, emu_wdata);
     } else if (verbose)
-        fprintf(dromajo_stderr, "                      ");
+        log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, "                      ");
 
     if (verbose)
-        fprintf(dromajo_stderr, " DASM(0x%08x)\n", emu_insn);
+        log_buff_space += snprintf(log_buffer+log_buff_space, 512-log_buff_space, " DASM(0x%08x)\n", emu_insn);
+    (m.debug_log)(hartid, log_buffer);
 
     if (!check)
         return 0;
 
     uint64_t emu_mstatus = riscv_cpu_get_mstatus(s);
 
+    /*
+     * XXX We currently do not compare mstatus because DUT's mstatus
+     * varies between pre-commit (all FP instructions) and post-commit
+     * (CSR instructions).
+     */
     if (emu_pc      != dut_pc                           ||
         emu_insn    != dut_insn  && (emu_insn & 3) == 3 || // DUT expands all C instructions
         emu_mstatus != dut_mstatus                      ||
         emu_wdata   != dut_wdata && emu_wrote_data) {
-        fprintf(dromajo_stderr, "[error] HARTID: %d\n", hartid);
-        fprintf(dromajo_stderr, "[error] EMU PC %016" PRIx64 ", DUT PC %016" PRIx64 "\n", emu_pc, dut_pc);
-        fprintf(dromajo_stderr, "[error] EMU INSN %08x, DUT INSN %08x\n", emu_insn, dut_insn);
+        (m.error_log)(hartid, "[error] EMU PC %016" PRIx64 ", DUT PC %016" PRIx64 "\n", emu_pc, dut_pc);
+        (m.error_log)(hartid, "[error] EMU INSN %08x, DUT INSN %08x\n", emu_insn, dut_insn);
         if (emu_wrote_data)
-            fprintf(dromajo_stderr, "[error] EMU WDATA %016" PRIx64 ", DUT WDATA %016" PRIx64 "\n", emu_wdata, dut_wdata);
-        fprintf(dromajo_stderr, "[error] EMU MSTATUS %08" PRIx64 ", DUT MSTATUS %08" PRIx64 "\n", emu_mstatus, dut_mstatus);
-        fprintf(dromajo_stderr,
-                "[error] DUT pending exception %d pending interrupt %d\n",
-                s->dut_exception,
-                s->dut_interrupt);
+            (m.error_log)(hartid, "[error] EMU WDATA %016" PRIx64 ", DUT WDATA %016" PRIx64 "\n", emu_wdata, dut_wdata);
+        (m.error_log)(hartid, "[error] EMU MSTATUS %08" PRIx64 ", DUT MSTATUS %08" PRIx64 "\n", emu_mstatus, dut_mstatus);
+        (m.error_log)(hartid, "[error] DUT pending exception %d pending interrupt %d\n",
+                               r->common.pending_exception, r->common.pending_interrupt);
         exit_code = 0x1FFF;
     }
 
@@ -483,6 +574,7 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
 int dromajo_cosim_override_mem(dromajo_cosim_state_t *state, int hartid, uint64_t dut_paddr, uint64_t dut_val, int size_log2) {
     RISCVMachine * r = (RISCVMachine *)state;
     RISCVCPUState *s = r->cpu_state[hartid];
+    VirtMachine m = r->common;
 
     uint8_t *        ptr;
     target_ulong     offset;
@@ -490,9 +582,9 @@ int dromajo_cosim_override_mem(dromajo_cosim_state_t *state, int hartid, uint64_
 
     if (!pr) {
 #ifdef DUMP_INVALID_MEM_ACCESS
-        fprintf(dromajo_stderr, "riscv_cpu_write_memory: invalid physical address 0x%016" PRIx64 "\n", dut_paddr);
+        (m.debug_log)(hartid, "riscv_cpu_write_memory: invalid physical address 0x%016" PRIx64 "\n", dut_paddr);
 #endif
-        return 1;
+        return 0;
     } else if (pr->is_ram) {
         phys_mem_set_dirty_bit(pr, dut_paddr - pr->addr);
         ptr = pr->phys_mem + (uintptr_t)(dut_paddr - pr->addr);
@@ -522,12 +614,22 @@ int dromajo_cosim_override_mem(dromajo_cosim_state_t *state, int hartid, uint64_
 #endif
         else {
 #ifdef DUMP_INVALID_MEM_ACCESS
-            fprintf(dromajo_stderr,
-                    "unsupported device write access: addr=0x%016" PRIx64 "  width=%d bits\n",
-                    dut_paddr,
-                    1 << (3 + size_log2));
+            (m.debug_log)(hartid, "unsupported device write access: addr=0x%016" PRIx64 "  width=%d bits\n", dut_paddr,
+                          1 << (3 + size_log2));
 #endif
         }
     }
     return 0;
+}
+
+/*
+ * dromajo_install_new_loggers --
+ *
+ * Sets logging/error functions.
+ */
+void dromajo_install_new_loggers(dromajo_cosim_state_t *state, dromajo_logging_func_t *debug_log,
+                                 dromajo_logging_func_t *error_log) {
+    VirtMachine *m = (VirtMachine *)state;
+    m->debug_log = debug_log;
+    m->error_log = error_log;
 }
