@@ -563,7 +563,7 @@ static void usage(const char *prog, const char *msg) {
             "       --ignore_sbi_shutdown continue simulation even upon seeing the SBI_SHUTDOWN call\n"
             "       --dump_memories dump memories that could be used to load a cosimulation\n"
             "       --memory_size sets the memory size in MiB (default 256 MiB)\n"
-            "       --memory_addr sets the memory start address (default 0x%lx)\n"
+            "       --memory_addr sets the memory start address (default 0x%lux)\n"
             "       --bootrom load in a bootrom img file (default is dromajo bootrom)\n"
             "       --dtb load in a dtb file (default is dromajo dtb)\n"
             "       --compact_bootrom have dtb be directly after bootrom (default 256B after boot base)\n"
@@ -571,10 +571,7 @@ static void usage(const char *prog, const char *msg) {
             "       --plic START:SIZE set PLIC start address and size in B (defaults to 0x%lx:0x%lx)\n"
             "       --clint START:SIZE set CLINT start address and size in B (defaults to 0x%lx:0x%lx)\n"
             "       --custom_extension add X extension to misa for all cores\n"
-            "       --enable_amo enables atomic instructions\n"
-            "       --enable_mulh enables mulh extention support\n"
-            "       --host enable BlackParrot host\n"
-            "       --checkpoint_period creates a checkpoint evey N instructions\n",
+            "       --checkpoint_period creates a checkpoint evey N instructions\n"
 #ifdef LIVECACHE
             "       --live_cache_size live cache warmup for checkpoint (default 8M)\n"
 #endif
@@ -582,8 +579,8 @@ static void usage(const char *prog, const char *msg) {
             msg,
             CONFIG_VERSION,
             prog,
-            (long)BOOT_BASE_ADDR,
             (long)RAM_BASE_ADDR,
+            (long)BOOT_BASE_ADDR,
             (long)PLIC_BASE_ADDR,
             (long)PLIC_SIZE,
             (long)CLINT_BASE_ADDR,
@@ -635,9 +632,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     uint64_t    clint_base_addr_override = 0;
     uint64_t    clint_size_override      = 0;
     bool        custom_extension         = false;
-    bool        amo_en                   = false;
-    bool        mulh                     = false;
-    bool        host                     = false;
     uint64_t    checkpoint_period        = 0;
     const char *simpoint_file            = 0;
     bool        clear_ids                = false;
@@ -674,9 +668,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             {"plic",                    required_argument, 0,  'p' }, // CFG
             {"clint",                   required_argument, 0,  'C' }, // CFG
             {"custom_extension",              no_argument, 0,  'u' }, // CFG
-            {"enable_amo",                    no_argument, 0,  'a' },
-            {"enable_mulh",                   no_argument, 0,  'H' },
-            {"host",                          no_argument, 0,  'h' },
             {"checkpoint_period",       required_argument, 0,  'e' },
             {"clear_ids",                     no_argument, 0,  'L' }, // CFG
             {"ctrlc",                         no_argument, 0,  'X' },
@@ -822,12 +813,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
             } break;
 
             case 'u': custom_extension = true; break;
-
-            case 'a': amo_en = true; break;
-
-            case 'H': mulh = true; break;
-
-            case 'h': host = true; break;
 
             case 'e':
                 if(checkpoint_period)
@@ -1021,15 +1006,6 @@ RISCVMachine *virt_machine_main(int argc, char **argv) {
     // core modifications
     p->custom_extension = custom_extension;
     p->clear_ids        = clear_ids;
-
-    // AMO enable flag
-    p->amo_en = amo_en;
-
-    // MULH enable flag
-    p->mulh = mulh;
-
-    // BlackParrot Host
-    p->host = host;
 
     // Checkpoint Period
     p->checkpoint_period = checkpoint_period;

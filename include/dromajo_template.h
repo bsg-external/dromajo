@@ -265,14 +265,12 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
     s->most_recently_written_fp_reg = -1;
     s->info                         = ctf_nop;
 
-    bool tick_counters = !(s->debug_mode);
-
     if (n_cycles == 0)
         return 0;
     insn_counter_addend = s->insn_counter + n_cycles;
 
     /* check pending interrupts */
-    if (unlikely(((s->mip & s->mie) != 0) && (s->dut_interrupt != -1 || !s->machine->common.cosim))) {
+    if (unlikely(((s->mip & s->mie) != 0) && (s->pending_interrupt != -1 || !s->machine->common.cosim))) {
         if (raise_interrupt(s)) {
             --insn_counter_addend;
             goto done_interp;
@@ -304,7 +302,7 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
             target_ulong addr;
 
             /* check pending interrupts */
-            if (unlikely(((s->mip & s->mie) != 0) && (s->dut_interrupt != -1 || !s->machine->common.cosim))) {
+            if (unlikely(((s->mip & s->mie) != 0) && (s->pending_interrupt != -1 || !s->machine->common.cosim))) {
                 if (raise_interrupt(s)) {
                     goto the_end;
                 }
@@ -1003,21 +1001,9 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                     funct3 = (insn >> 12) & 7;
                     switch (funct3) {
                         case 0: /* mul */ val = (intx_t)((intx_t)val * (intx_t)val2); break;
-                        case 1: /* mulh */
-                            if (!s->machine->mulh)
-                                goto illegal_insn;
-                            val = (intx_t)glue(mulh, XLEN)(val, val2); 
-                            break;
-                        case 2: /* mulhsu */
-                            if (!s->machine->mulh)
-                                goto illegal_insn;
-                            val = (intx_t)glue(mulhsu, XLEN)(val, val2); 
-                            break;
-                        case 3: /* mulhu */
-                            if (!s->machine->mulh)
-                                goto illegal_insn;
-                            val = (intx_t)glue(mulhu, XLEN)(val, val2); 
-                            break;
+                        case 1: /* mulh */ val = (intx_t)glue(mulh, XLEN)(val, val2); break;
+                        case 2: /* mulhsu */ val = (intx_t)glue(mulhsu, XLEN)(val, val2); break;
+                        case 3: /* mulhu */ val = (intx_t)glue(mulhu, XLEN)(val, val2); break;
                         case 4: /* div */ val = glue(div, XLEN)(val, val2); break;
                         case 5: /* divu */ val = (intx_t)glue(divu, XLEN)(val, val2); break;
                         case 6: /* rem */ val = glue(rem, XLEN)(val, val2); break;
@@ -1247,7 +1233,7 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                                     goto illegal_insn;
                                 /* go to power down if no enabled interrupts are
                                    pending */
-                                if (((s->mip & s->mie) == 0) && (s->dut_interrupt == -1)
+                                if (((s->mip & s->mie) == 0) && (s->pending_interrupt == -1)
                                     || !s->machine->common.cosim) {
                                     s->power_down_flag = TRUE;
                                     s->pc              = GET_PC() + 4;
@@ -1315,9 +1301,10 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
                     goto illegal_insn;                                                  \
                 if (target_read_u##size(s, &rval, addr))                                \
                     goto mmu_exception;                                                 \
-                    for(int i=0; i < s->machine->ncpus; i++)                            \
-                        if(s->machine->cpu_state[i]->load_res == addr)                  \
-                            s->machine->cpu_state[i]->load_res = ~0;                    \
+                /* Clobber other CPUs reservations */                                   \
+                for(int i=0; i < s->machine->ncpus; i++)                                \
+                    if(s->machine->cpu_state[i]->load_res == addr)                      \
+                        s->machine->cpu_state[i]->load_res = ~0;                        \
                 val         = (int##size##_t)rval;                                      \
                 s->load_res = addr;                                                     \
                 s->load_res_memseqno = s->machine->memseqno;                            \
@@ -1348,8 +1335,6 @@ int no_inline glue(riscv_cpu_interp, XLEN)(RISCVCPUState *s, int n_cycles) {
             case 0x14: /* amomax.w */                                                   \
             case 0x18: /* amominu.w */                                                  \
             case 0x1c: /* amomaxu.w */                                                  \
-                if (!s->machine->amo_en)                                                \
-                    goto illegal_insn;                                                  \
                 if (target_read_u##size(s, &rval, addr)) {                              \
                     if (s->pending_exception != CAUSE_BREAKPOINT)                       \
                         s->pending_exception += 2; /* LD -> ST */                       \
@@ -1850,7 +1835,7 @@ done_interp:
 
 the_end:
     s->insn_counter = GET_INSN_COUNTER();
-    if (tick_counters) {
+    if (!s->stop_the_counter) {
         int delta = s->insn_counter - insn_counter_start;
         assert(delta >= 0);
         s->mcycle += delta;

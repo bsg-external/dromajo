@@ -188,32 +188,32 @@ static inline uint64_t track_iread(RISCVCPUState *s, uint64_t vaddr, uint64_t pa
  * modes, which by default have none, and can revoke permissions from
  * M-mode, which by default has full permissions." */
 bool riscv_cpu_pmp_access_ok(RISCVCPUState *s, uint64_t paddr, size_t size, pmpcfg_t perm) {
+    //int priv;
+
+    ///* rv64mi-p-access expects illegal physical addresses to fail. */
+    //if ((uint64_t)paddr >> s->physical_addr_len != 0)
+    //    return false;
+
+    //if ((s->mstatus & MSTATUS_MPRV) && !(perm & PMPCFG_X)) {
+    //    /* use previous privilege */
+    //    priv = (s->mstatus >> MSTATUS_MPP_SHIFT) & 3;
+    //} else {
+    //    priv = s->priv;
+    //}
+
+    //// Check for _any_ bytes from the range overlapping with a PMP
+    //// region (we don't support the cases where the PMP region is
+    //// smaller than the access).
+    //for (int i = 0; i < s->pmp_n; ++i)
+    //    // [lo;hi) `intersect` [paddr;paddr+size) is non-empty
+    //    if (s->pmp[i].lo <= paddr + size - 1 && paddr < s->pmp[i].hi)
+    //        if (priv < PRV_M || s->pmpcfg[i] & PMPCFG_L)
+    //            return (perm & s->pmpcfg[i]) == perm;
+    //        else
+    //            return true;
+
+    //return priv == PRV_M;
     return true;
-    int priv;
-
-    /* rv64mi-p-access expects illegal physical addresses to fail. */
-    if ((uint64_t)paddr >> s->physical_addr_len != 0)
-        return false;
-
-    if ((s->mstatus & MSTATUS_MPRV) && !(perm & PMPCFG_X)) {
-        /* use previous privilege */
-        priv = (s->mstatus >> MSTATUS_MPP_SHIFT) & 3;
-    } else {
-        priv = s->priv;
-    }
-
-    // Check for _any_ bytes from the range overlapping with a PMP
-    // region (we don't support the cases where the PMP region is
-    // smaller than the access).
-    for (int i = 0; i < s->pmp_n; ++i)
-        // [lo;hi) `intersect` [paddr;paddr+size) is non-empty
-        if (s->pmp[i].lo <= paddr + size - 1 && paddr < s->pmp[i].hi)
-            if (priv < PRV_M || s->pmpcfg[i] & PMPCFG_L)
-                return (perm & s->pmpcfg[i]) == perm;
-            else
-                return true;
-
-    return priv == PRV_M;
 }
 // Returns PhysMemoryRange, NULL address or otherwise, if access isn't
 // considered pmp blocked, sets fail to false - otherwise NULL address
@@ -1403,10 +1403,10 @@ static int csr_read(RISCVCPUState *s, uint32_t funct3, target_ulong *pval, uint3
         case 0xb1f:
         case 0xc1f:
             goto invalid_csr;
-            if (!counter_access_ok(s, csr))
-                goto invalid_csr;
-            val = 0;  // mhpmcounter3..31
-            break;
+            //if (!counter_access_ok(s, csr))
+            //    goto invalid_csr;
+            //val = 0;  // mhpmcounter3..31
+            //break;
 #if VLEN > 0
         case 0xc20: /* vl */
             if (s->vs == 0)
@@ -1456,10 +1456,10 @@ static int csr_read(RISCVCPUState *s, uint32_t funct3, target_ulong *pval, uint3
         case 0x33c:
         case 0x33d:
         case 0x33e:
-        case 0x33f: goto invalid_csr; val = s->mhpmevent[csr & 0x1F]; break;
+        case 0x33f: goto invalid_csr; //val = s->mhpmevent[csr & 0x1F]; break;
 
         case CSR_PMPCFG(0):  // NB: 1 and 3 are _illegal_ in RV64
-        case CSR_PMPCFG(2): goto invalid_csr; val = s->csr_pmpcfg[csr - CSR_PMPCFG(0)]; break;
+        case CSR_PMPCFG(2): goto invalid_csr; //val = s->csr_pmpcfg[csr - CSR_PMPCFG(0)]; break;
 
         case CSR_PMPADDR(0):  // NB: *must* support either none or all
         case CSR_PMPADDR(1):
@@ -1476,9 +1476,8 @@ static int csr_read(RISCVCPUState *s, uint32_t funct3, target_ulong *pval, uint3
         case CSR_PMPADDR(12):
         case CSR_PMPADDR(13):
         case CSR_PMPADDR(14):
-        case CSR_PMPADDR(15): goto invalid_csr;
-        //case CSR_PMPADDR(15): val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)]; break;
-                              
+        case CSR_PMPADDR(15): goto invalid_csr; //val = s->csr_pmpaddr[csr - CSR_PMPADDR(0)]; break;
+
 #ifdef SIMPOINT_BB
         case 0x8C2: val = 0; break;
 #endif
@@ -1517,60 +1516,60 @@ static int get_insn_rm(RISCVCPUState *s, unsigned int rm) {
 }
 #endif
 
-static void unpack_pmpaddrs(RISCVCPUState *s) {
-    uint8_t cfg;
-    s->pmp_n = 0;
-
-    for (int i = 0; i < 16; ++i) {
-        if (i < 8)
-            cfg = s->csr_pmpcfg[0] >> (i * 8);
-        else
-            cfg = s->csr_pmpcfg[2] >> ((i - 8) * 8);
-
-        switch (cfg & PMPCFG_A_MASK) {
-            case PMPCFG_A_OFF: break;
-
-            case PMPCFG_A_TOR:
-                s->pmpcfg[s->pmp_n] = cfg;
-                s->pmp[s->pmp_n].lo = i == 0 ? 0 : s->csr_pmpaddr[i - 1] << 2;
-                s->pmp[s->pmp_n].hi = s->csr_pmpaddr[i] << 2;
-                s->pmp_n++;
-                break;
-
-            case PMPCFG_A_NA4:
-                s->pmpcfg[s->pmp_n] = cfg;
-                s->pmp[s->pmp_n].lo = s->csr_pmpaddr[i] << 2;
-                s->pmp[s->pmp_n].hi = (s->csr_pmpaddr[i] << 2) + 4;
-                s->pmp_n++;
-                break;
-
-            case PMPCFG_A_NAPOT: {
-                s->pmpcfg[s->pmp_n] = cfg;
-                int j;
-                // Count trailing ones
-                for (j = 0; j < 64; ++j)
-                    if ((s->csr_pmpaddr[i] & (1llu << j)) == 0)
-                        break;
-                j += 3;  // 8-byte is the lowest option
-                // NB, meaningless when i >= 56!
-                if (j >= 64) {
-                    s->pmp[s->pmp_n].lo = 0;
-                    s->pmp[s->pmp_n].hi = ~0ll;
-                } else {
-                    s->pmp[s->pmp_n].lo = (s->csr_pmpaddr[i] << 2) & ~((1llu << j) - 1);
-                    s->pmp[s->pmp_n].hi = s->pmp[s->pmp_n].lo + (1llu << j);
-                    if (s->pmp[s->pmp_n].hi <= s->pmp[s->pmp_n].lo)
-                        // Overflowed
-                        s->pmp[s->pmp_n].hi = ~0ll;
-                }
-                s->pmp_n++;
-                break;
-            }
-        }
-    }
-
-    tlb_flush_all(s);  // The TLB partically caches PMP decisions
-}
+//static void unpack_pmpaddrs(RISCVCPUState *s) {
+//    uint8_t cfg;
+//    s->pmp_n = 0;
+//
+//    for (int i = 0; i < 16; ++i) {
+//        if (i < 8)
+//            cfg = s->csr_pmpcfg[0] >> (i * 8);
+//        else
+//            cfg = s->csr_pmpcfg[2] >> ((i - 8) * 8);
+//
+//        switch (cfg & PMPCFG_A_MASK) {
+//            case PMPCFG_A_OFF: break;
+//
+//            case PMPCFG_A_TOR:
+//                s->pmpcfg[s->pmp_n] = cfg;
+//                s->pmp[s->pmp_n].lo = i == 0 ? 0 : s->csr_pmpaddr[i - 1] << 2;
+//                s->pmp[s->pmp_n].hi = s->csr_pmpaddr[i] << 2;
+//                s->pmp_n++;
+//                break;
+//
+//            case PMPCFG_A_NA4:
+//                s->pmpcfg[s->pmp_n] = cfg;
+//                s->pmp[s->pmp_n].lo = s->csr_pmpaddr[i] << 2;
+//                s->pmp[s->pmp_n].hi = (s->csr_pmpaddr[i] << 2) + 4;
+//                s->pmp_n++;
+//                break;
+//
+//            case PMPCFG_A_NAPOT: {
+//                s->pmpcfg[s->pmp_n] = cfg;
+//                int j;
+//                // Count trailing ones
+//                for (j = 0; j < 64; ++j)
+//                    if ((s->csr_pmpaddr[i] & (1llu << j)) == 0)
+//                        break;
+//                j += 3;  // 8-byte is the lowest option
+//                // NB, meaningless when i >= 56!
+//                if (j >= 64) {
+//                    s->pmp[s->pmp_n].lo = 0;
+//                    s->pmp[s->pmp_n].hi = ~0ll;
+//                } else {
+//                    s->pmp[s->pmp_n].lo = (s->csr_pmpaddr[i] << 2) & ~((1llu << j) - 1);
+//                    s->pmp[s->pmp_n].hi = s->pmp[s->pmp_n].lo + (1llu << j);
+//                    if (s->pmp[s->pmp_n].hi <= s->pmp[s->pmp_n].lo)
+//                        // Overflowed
+//                        s->pmp[s->pmp_n].hi = ~0ll;
+//                }
+//                s->pmp_n++;
+//                break;
+//            }
+//        }
+//    }
+//
+//    tlb_flush_all(s);  // The TLB partically caches PMP decisions
+//}
 
 /* return -1 if invalid CSR, 0 if OK, -2 if CSR raised an exception,
  * 2 if TLBs have been flushed. */
@@ -1781,32 +1780,32 @@ static int csr_write(RISCVCPUState *s, uint32_t funct3, uint32_t csr, target_ulo
         case 0x33c:
         case 0x33d:
         case 0x33e:
-        case 0x33f: goto invalid_csr; s->mhpmevent[csr & 0x1F] = val & (HPM_EVENT_SETMASK | HPM_EVENT_EVENTMASK); break;
+        case 0x33f: goto invalid_csr; //s->mhpmevent[csr & 0x1F] = val & (HPM_EVENT_SETMASK | HPM_EVENT_EVENTMASK); break;
 
         case CSR_PMPCFG(0):  // NB: 1 and 3 are _illegal_ in RV64
         case CSR_PMPCFG(2): {
             goto invalid_csr;
-            assert(PMP_N % 8 == 0);
-            int c = csr - CSR_PMPCFG(0);
+            //assert(PMP_N % 8 == 0);
+            //int c = csr - CSR_PMPCFG(0);
 
-            if (PMP_N <= c / 2 * 8)
-                break;
+            //if (PMP_N <= c / 2 * 8)
+            //    break;
 
-            uint64_t orig    = s->csr_pmpcfg[c];
-            uint64_t new_val = 0;
+            //uint64_t orig    = s->csr_pmpcfg[c];
+            //uint64_t new_val = 0;
 
-            for (int i = 0; i < 8; ++i) {
-                uint64_t cfg = (orig >> (i * 8)) & 255;
-                if ((cfg & PMPCFG_L) == 0)
-                    cfg = (val >> (i * 8)) & 255;
-                cfg &= ~PMPCFG_RES;
-                new_val |= cfg << (i * 8);
-            }
+            //for (int i = 0; i < 8; ++i) {
+            //    uint64_t cfg = (orig >> (i * 8)) & 255;
+            //    if ((cfg & PMPCFG_L) == 0)
+            //        cfg = (val >> (i * 8)) & 255;
+            //    cfg &= ~PMPCFG_RES;
+            //    new_val |= cfg << (i * 8);
+            //}
 
-            s->csr_pmpcfg[c] = new_val;
+            //s->csr_pmpcfg[c] = new_val;
 
-            unpack_pmpaddrs(s);
-            break;
+            //unpack_pmpaddrs(s);
+            //break;
         }
 
         case CSR_PMPADDR(0):  // NB: *must* support either none or all
@@ -2194,7 +2193,7 @@ uint64_t riscv_cpu_get_cycles(RISCVCPUState *s) { return s->mcycle; }
 void riscv_cpu_set_mip(RISCVCPUState *s, uint32_t mask) {
     s->mip |= mask;
     /* exit from power down if an interrupt is pending */
-    if (s->power_down_flag && (s->mip & s->mie) != 0 && (s->dut_interrupt != -1 || !s->machine->common.cosim))
+    if (s->power_down_flag && (s->mip & s->mie) != 0 && (s->pending_interrupt != -1 || !s->machine->common.cosim))
         s->power_down_flag = FALSE;
 }
 
@@ -2563,15 +2562,15 @@ static void create_io64_recovery(uint32_t *rom, uint32_t *code_pos, uint32_t *da
     rom[core_off + (*data_pos)++] = val >> 32;
 }
 
-static void create_hang_nonzero_hart(uint32_t *rom, uint32_t *code_pos, uint32_t *data_pos) {
-    /* Note, this matches the boot loader prologue from copy_kernel() */
-
-    rom[(*code_pos)++] = 0xf1402573;  // start:  csrr   a0, mhartid
-    rom[(*code_pos)++] = 0x00050663;  //         beqz   a0, 1f
-    rom[(*code_pos)++] = 0x10500073;  // 0:      wfi
-    rom[(*code_pos)++] = 0xffdff06f;  //         j      0b
-                                      // 1:
-}
+//static void create_hang_nonzero_hart(uint32_t *rom, uint32_t *code_pos, uint32_t *data_pos) {
+//    /* Note, this matches the boot loader prologue from copy_kernel() */
+//
+//    rom[(*code_pos)++] = 0xf1402573;  // start:  csrr   a0, mhartid
+//    rom[(*code_pos)++] = 0x00050663;  //         beqz   a0, 1f
+//    rom[(*code_pos)++] = 0x10500073;  // 0:      wfi
+//    rom[(*code_pos)++] = 0xffdff06f;  //         j      0b
+//                                      // 1:
+//}
 
 void create_boot_rom(RISCVMachine *m, const char *file, const uint64_t clint_base_addr) {
     int ROMSize = ROM_SIZE * m->ncpus;

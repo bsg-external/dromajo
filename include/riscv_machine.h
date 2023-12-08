@@ -116,15 +116,6 @@ struct RISCVMachine {
     /* Extension state, not used by Dromajo itself */
     void *ext_state;
 
-    /* Enable atomic instructions */
-    bool amo_en;
-
-    /* Enable mulh extention */
-    bool mulh;
-
-    /* Enable BlackParrot Host */
-    bool host;
-
     /* Periodically create checkpoints */
     uint64_t checkpoint_period;
 };

@@ -176,15 +176,6 @@ typedef struct {
     /* Add to misa custom extensions */
     bool custom_extension;
 
-    /* Enable atomic instructions */
-    bool amo_en;
-
-    /* Enable mulh extention */
-    bool mulh;
-
-    /* Enable BlackParrot Host */
-    bool host;
-
     /* Periodically create checkpoints */
     uint64_t checkpoint_period;
 
@@ -218,10 +209,10 @@ typedef struct VirtMachine {
     uint64_t maxinsns;
     uint64_t trace;
 
-    /* For co-simulation only */
+    ///* For co-simulation only, they are -1 if nothing is pending. */
     bool cosim;
-    int  pending_interrupt;
-    int  pending_exception;
+    //int  pending_interrupt;
+    //int  pending_exception;
 
     /* Central logging facility, so far only used in dromajo_cosim */
     dromajo_logging_func_t *error_log;

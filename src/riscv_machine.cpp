@@ -200,19 +200,19 @@ void host_monitor()
 }
 
 void host_init(RISCVMachine* m) {
-  if(m->host) {
-      core_finish = new std::vector<bool>(m->ncpus, false);
-      while(!getchar_fifo.empty())
-          getchar_fifo.pop();
-      std::thread t(&host_monitor);
-      t.detach();
+  if (!m->common.cosim) {
+    core_finish = new std::vector<bool>(m->ncpus, false);
+    while(!getchar_fifo.empty())
+        getchar_fifo.pop();
+    std::thread t(&host_monitor);
+    t.detach();
   }
 }
 
 static uint32_t host_read(void *opaque, uint32_t offset, int size_log2) {
-  RISCVMachine *m = (RISCVMachine *)opaque;
   int c = -1;
-  if(m->host && offset == HOST_GETCHAR && !getchar_fifo.empty()) {
+  RISCVMachine *m = (RISCVMachine *)opaque;
+  if(!m->common.cosim && offset == HOST_GETCHAR && !getchar_fifo.empty()) {
     c = getchar_fifo.front();
     getchar_fifo.pop();
   }
@@ -221,24 +221,24 @@ static uint32_t host_read(void *opaque, uint32_t offset, int size_log2) {
 
 static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
   RISCVMachine *m = (RISCVMachine *)opaque;
-  if(m->host) {
-    if(offset == HOST_PUTCHAR) {
-      printf("%c", val);
-      fflush(stdout);
-    }
-    else if((offset & 0xf000) == HOST_FINISH) {
-      int hartid = (offset - HOST_FINISH) >> 3;
-      core_finish->at(hartid) = true;
+  if (m->common.cosim)
+      return;
+  if(offset == HOST_PUTCHAR) {
+    printf("%c", val);
+    fflush(stdout);
+  }
+  else if((offset & 0xf000) == HOST_FINISH) {
+    int hartid = (offset - HOST_FINISH) >> 3;
+    core_finish->at(hartid) = true;
 
-      const char* pass_fail = (val == 0)? "PASS" : "FAIL";
-      printf("[CORE%d FSH] %s\n", hartid, pass_fail);
-      printf("\tinstret: %lld\n", m->cpu_state[hartid]->minstret);
+    const char* pass_fail = (val == 0)? "PASS" : "FAIL";
+    printf("[CORE%d FSH] %s\n", hartid, pass_fail);
+    printf("\tinstret: %lud\n", m->cpu_state[hartid]->minstret);
 
-      for(int i=0; i < m->ncpus; i++)
-        if(core_finish->at(i) == false)
-          return;
-      exit(0);
-    }
+    for(int i=0; i < m->ncpus; i++)
+      if(core_finish->at(i) == false)
+        return;
+    exit(0);
   }
 }
 
@@ -272,6 +272,7 @@ static uint32_t param_rom_read(void *opaque, uint32_t offset, int size_log2) {
   else {
     vm_error("param_rom_read to unimplemented address PARAM_ROM_BASE_ADDR+0x%x\n", offset);
   }
+  return -1;
 }
 
 static void param_rom_write(void *opaque, uint32_t offset, uint32_t val, int size_log2) {
@@ -1284,17 +1285,15 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     /* add custom extension bit to misa */
     s->custom_extension = p->custom_extension;
 
+    /* Set periodic checkpoint interval */
+    s->checkpoint_period = p->checkpoint_period;
+
     s->plic_base_addr  = p->plic_base_addr;
     s->plic_size       = p->plic_size;
     s->clint_base_addr = p->clint_base_addr;
     s->clint_size      = p->clint_size;
     /* clear mimpid, marchid, mvendorid */
     s->clear_ids = p->clear_ids;
-
-    s->amo_en = p->amo_en;
-    s->mulh = p->mulh;
-    s->host = p->host;
-    s->checkpoint_period = p->checkpoint_period;
 
     if (MAX_CPUS < s->ncpus) {
         vm_error("ERROR: ncpus:%d exceeds maximum MAX_CPU\n", s->ncpus);
@@ -1454,8 +1453,8 @@ RISCVMachine *virt_machine_init(const VirtMachineParams *p) {
     /* interrupts and exception setup for cosim */
     s->common.cosim             = false;
     for (int i = 0; i < s->ncpus; ++i) {
-        s->cpu_state[i]->dut_exception = -1;
-        s->cpu_state[i]->dut_interrupt = -1;
+        s->cpu_state[i]->pending_exception = -1;
+        s->cpu_state[i]->pending_interrupt = -1;
     }
 
     /* plic/clint setup */
@@ -1541,6 +1540,11 @@ void virt_machine_end(RISCVMachine *s) {
 }
 
 void virt_machine_serialize(RISCVMachine *m, const char *dump_name) {
+    //RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
+
+    //vm_error("plic: %x %x timecmp=%llx\n", m->plic_pending_irq, m->plic_served_irq, (unsigned long long)s->timecmp);
+
+    //assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
     //riscv_cpu_serialize(s, dump_name, m->clint_base_addr);
     fprintf(dromajo_stderr, "creating a new boot rom\n");
     for (int i = m->mem_map->n_phys_mem_range - 1; i >= 0; --i) {
@@ -1560,6 +1564,9 @@ void virt_machine_serialize(RISCVMachine *m, const char *dump_name) {
 }
 
 void virt_machine_deserialize(RISCVMachine *m, const char *dump_name) {
+    //RISCVCPUState *s = m->cpu_state[0];  // FIXME: MULTICORE
+    //
+    //assert(m->ncpus == 1);  // FIXME: riscv_cpu_serialize must be patched for multicore
     //riscv_cpu_deserialize(s, dump_name);
     for (int i = m->mem_map->n_phys_mem_range - 1; i >= 0; --i) {
         PhysMemoryRange *pr = &m->mem_map->phys_mem_range[i];

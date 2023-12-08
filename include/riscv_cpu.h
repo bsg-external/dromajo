@@ -240,6 +240,7 @@ typedef struct RISCVCPUState {
                            * simulation */
     BOOL         terminate_simulation;
     int          pending_exception; /* used during MMU exception handling */
+    int          pending_interrupt;
     target_ulong pending_tval;
 
     /* CSRs */
@@ -328,10 +329,6 @@ typedef struct RISCVCPUState {
 
     /* Extension state, not used by Dromajo itself */
     void *ext_cpu_state;
-
-    /* Cosim flags */
-    int dut_interrupt;
-    int dut_exception;
 } RISCVCPUState;
 
 RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid);
