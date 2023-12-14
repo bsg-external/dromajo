@@ -1182,7 +1182,7 @@ bool vectorize_arithmetic(RISCVCPUState *s, uint8_t vs2, uint8_t vd, target_ulon
 static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask) {
     target_ulong val;
     BOOL         sd;
-    val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT) | (s->vs << MSTATUS_VS_SHIFT);
+    val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT);// | (s->vs << MSTATUS_VS_SHIFT);
     val &= mask;
     sd = ((val & MSTATUS_VS) == MSTATUS_VS) | ((val & MSTATUS_FS) == MSTATUS_FS) | ((val & MSTATUS_XS) == MSTATUS_XS);
     if (sd)
@@ -2209,7 +2209,7 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
     s->mem_map         = machine->mem_map;
     s->pc              = machine->reset_vector;
     s->priv            = PRV_M;
-    s->mstatus         = ((uint64_t)2 << MSTATUS_UXL_SHIFT) | ((uint64_t)2 << MSTATUS_SXL_SHIFT) | (3 << MSTATUS_MPP_SHIFT);
+    s->mstatus         = ((uint64_t)2 << MSTATUS_UXL_SHIFT) | ((uint64_t)2 << MSTATUS_SXL_SHIFT) | (0 << MSTATUS_MPP_SHIFT);
     s->plic_enable_irq[0] = 0;
     s->plic_enable_irq[1] = 0;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
@@ -2238,9 +2238,9 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
         s->marchid   = 0;
         s->mimpid    = 0;
     } else {
-        s->mvendorid = 11 * 128 + 101;  // Esperanto JEDEC number 101 in bank 11 (Change for your own)
-        s->marchid   = (1ULL << 63) | 2;
-        s->mimpid    = 1;
+        s->mvendorid = 0;
+        s->marchid   = 13;
+        s->mimpid    = 3;
     }
     s->mhartid = hartid;
 

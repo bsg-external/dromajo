@@ -441,7 +441,7 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
      */
     if (emu_pc      != dut_pc                           ||
         emu_insn    != dut_insn  && (emu_insn & 3) == 3 || // DUT expands all C instructions
-        //emu_mstatus != dut_mstatus                      ||
+        emu_mstatus != dut_mstatus                      ||
         emu_wdata   != dut_wdata && emu_wrote_data) {
         (m.error_log)(hartid, "[error] EMU PC %016" PRIx64 ", DUT PC %016" PRIx64 "\n", emu_pc, dut_pc);
         (m.error_log)(hartid, "[error] EMU INSN %08x, DUT INSN %08x\n", emu_insn, dut_insn);
