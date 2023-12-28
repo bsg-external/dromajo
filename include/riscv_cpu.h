@@ -106,7 +106,7 @@ typedef uint128_t fp_uint;
 //#define VLEN <size_in_bits_here>
 //#define ELEN <typically_default_but_might_be_rattified>
 /* Uncomment the next line to DISABLE Vector Simulation "V-extension" */
-//#define VLEN 0
+#define VLEN 0
 /* Uncomment the next line to have masked elements under mask-agnotic policy be filled with 1's
  * useful for vector register renaming, where masked elements dont need to be copied */
 //#define MASK_AGNOSTIC_FILL 1
