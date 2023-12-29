@@ -106,7 +106,10 @@ static inline bool is_mmio_load(RISCVCPUState *s, int reg, int offset, size_t si
 
     riscv_cpu_get_phys_addr(s, va, ACCESS_READ, &pa);
 
-    return riscv_cpu_pmp_access_ok(s, pa, size, PMPCFG_R) && !get_phys_mem_range(s->mem_map, pa);
+    PhysMemoryRange *pr = get_phys_mem_range(s->mem_map, pa);
+    bool io_map = !pr || !pr->is_ram;
+    return io_map;
+    //return riscv_cpu_pmp_access_ok(s, pa, size, PMPCFG_R) && !get_phys_mem_range(s->mem_map, pa);
 }
 
 /*
