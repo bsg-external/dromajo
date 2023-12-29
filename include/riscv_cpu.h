@@ -110,23 +110,23 @@ typedef uint128_t fp_uint;
 /* Uncomment the next line to have masked elements under mask-agnotic policy be filled with 1's
  * useful for vector register renaming, where masked elements dont need to be copied */
 //#define MASK_AGNOSTIC_FILL 1
-#ifndef VLEN
-#define VLEN VLEN_DEFAULT
-#endif
-#ifndef ELEN
-#define ELEN ELEN_DEFAULT
-#endif
-#if (ELEN < ELEN_MIN || VLEN < ELEN || !IS_PO2(ELEN))
-#undef ELEN
-#define ELEN ELEN_DEFAULT
-#endif
-#if (VLEN_MAX < VLEN || VLEN < ELEN || !IS_PO2(VLEN))
-#undef VLEN
-#define VLEN VLEN_DEFAULT
-#endif
-#if VLEN > 0
-#include "vector_template.h"
-#endif
+//#ifndef VLEN
+//#define VLEN VLEN_DEFAULT
+//#endif
+//#ifndef ELEN
+//#define ELEN ELEN_DEFAULT
+//#endif
+//#if (ELEN < ELEN_MIN || VLEN < ELEN || !IS_PO2(ELEN))
+//#undef ELEN
+//#define ELEN ELEN_DEFAULT
+//#endif
+//#if (VLEN_MAX < VLEN || VLEN < ELEN || !IS_PO2(VLEN))
+//#undef VLEN
+//#define VLEN VLEN_DEFAULT
+//#endif
+//#if VLEN > 0
+//#include "vector_template.h"
+//#endif
 
 /* MLEN is the maximum memory access width */
 #if 64 <= 32 && FLEN <= 32

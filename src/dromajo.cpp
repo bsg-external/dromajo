@@ -180,6 +180,7 @@ static int iterate_core(RISCVMachine *m, int hartid, int n_cycles) {
         fprintf(dromajo_stderr, " x%2d 0x%016" PRIx64, iregno, virt_machine_get_reg(m, hartid, iregno));
     else if (fregno >= 0)
         fprintf(dromajo_stderr, " f%2d 0x%016" PRIx64, fregno, virt_machine_get_fpreg(m, hartid, fregno));
+#if VLEN > 0
     else
         for (int i = 31; i >= 0; i--)
             if (cpu->most_recently_written_vregs[i]) {
@@ -188,7 +189,7 @@ static int iterate_core(RISCVMachine *m, int hartid, int n_cycles) {
                     fprintf(dromajo_stderr, "%02" PRIx8, cpu->v_reg[i][j]);
                 }
             }
-
+#endif
 
     putc('\n', dromajo_stderr);
 
