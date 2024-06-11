@@ -153,6 +153,9 @@ static inline void handle_dut_overrides(RISCVCPUState *s, int priv, uint64_t pc,
         reg    = ((insn >> 7) & 7) + 8;
         offset = (get_field1(insn, 10, 3, 5) | get_field1(insn, 6, 2, 2) | get_field1(insn, 5, 6, 6));
         rd     = rdc;
+    } else if (is_store_conditional(insn) && rd != 0) {
+        riscv_set_reg(s, rd, dut_wdata);
+        return;
     } else
         return;
 
@@ -246,11 +249,13 @@ int dromajo_cosim_step(dromajo_cosim_state_t *state, int hartid, uint64_t dut_pc
 
         if (emu_pc == dut_pc && emu_insn == dut_insn && is_store_conditional(emu_insn) && dut_wdata != 0) {
             /* When DUT fails an SC, we must simulate the same behavior */
-            iregno = emu_insn >> 7 & 0x1f;
-            if (iregno > 0)
-                riscv_set_reg(s, iregno, dut_wdata);
-            riscv_set_pc(s, emu_pc + 4);
-            break;
+            s->load_res = ~0;
+            s->load_res_memseqno = 0;
+        } else if (emu_pc == dut_pc && emu_insn == dut_insn && is_store_conditional(emu_insn) && dut_wdata == 0) {
+            /* Similarly, when DUT succeeds... */
+            int rs1 = (emu_insn >> 15) & 0x1f;
+            s->load_res = riscv_get_reg(s, rs1);
+            s->load_res_memseqno = s->machine->memseqno;
         }
 
         if (r->cpu_state[hartid]->pending_interrupt != -1 && r->cpu_state[hartid]->pending_exception != -1) {
