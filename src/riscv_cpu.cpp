@@ -2229,6 +2229,7 @@ RISCVCPUState *riscv_cpu_init(RISCVMachine *machine, int hartid) {
     s->misa |= MCPUID_V;
 #endif
     s->misa |= MCPUID_C;
+    s->misa |= MCPUID_B;
 
     if (machine->custom_extension)
         s->misa |= MCPUID_X;
