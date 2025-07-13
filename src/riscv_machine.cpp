@@ -186,7 +186,6 @@ static void uart_write(void *opaque, uint32_t offset, uint32_t val, int size_log
 }
 
 std::queue<int> getchar_fifo;
-std::vector<bool>* core_finish;
 
 void host_monitor()
 {
@@ -200,7 +199,6 @@ void host_monitor()
 }
 
 void host_init(RISCVMachine* m) {
-  core_finish = new std::vector<bool>(m->ncpus, false);
   if (!m->common.cosim) {
     while(!getchar_fifo.empty())
         getchar_fifo.pop();
@@ -228,16 +226,12 @@ static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log
     fflush(stdout);
   }
   else if((offset & 0xf000) == HOST_FINISH) {
-    int hartid = (offset - HOST_FINISH) >> 3;
-    core_finish->at(hartid) = true;
-
     const char* pass_fail = (val == 0)? "PASS" : "FAIL";
+    int hartid = (offset - HOST_FINISH) >> 3;
     printf("[CORE%d FSH] %s\n", hartid, pass_fail);
-    printf("\tinstret: %lud\n", m->cpu_state[hartid]->minstret);
-
-    for(int i=0; i < m->ncpus; i++)
-      if(core_finish->at(i) == false)
-        return;
+    for (int i = 0; i < m->ncpus; i++) {
+        printf("\tinstret: %lud\n", m->cpu_state[i]->minstret);
+    }
     exit(0);
   }
 }
