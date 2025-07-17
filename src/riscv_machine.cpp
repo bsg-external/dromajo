@@ -227,8 +227,7 @@ static void host_write(void *opaque, uint32_t offset, uint32_t val, int size_log
   }
   else if((offset & 0xf000) == HOST_FINISH) {
     const char* pass_fail = (val == 0)? "PASS" : "FAIL";
-    int hartid = (offset - HOST_FINISH) >> 3;
-    printf("[CORE%d FSH] %s\n", hartid, pass_fail);
+    printf("[CORE FSH] %s\n", pass_fail);
     for (int i = 0; i < m->ncpus; i++) {
         printf("\tinstret: %lud\n", m->cpu_state[i]->minstret);
     }
